@@ -19,12 +19,24 @@ system-design/
 │   ├── src/                         ← Java 17 / Spring Boot 3
 │   └── sync-gateway/                ← Go 1.22: WebSocket → Redis pub/sub
 │
-└── live-streaming/                  ← Project 2: live streaming platform
-    ├── docker-compose.yml           ← all live-streaming services
-    ├── stream-api/                  ← Go 1.22: REST API, auth, SRS webhooks
-    ├── chat-service/                ← Go 1.22: WebSocket chat, Redis fanout
-    ├── srs/srs.conf                 ← SRS media server (RTMP ingest + HLS)
-    └── nginx/nginx.conf             ← HLS segment server
+├── job-scheduler/                   ← Project 3: distributed job scheduler
+│   ├── docker-compose.yml           ← postgres + redis + job-service + 3 schedulers + 3 workers
+│   ├── job-service/                 ← Go 1.22: REST API for job submission & status
+│   ├── scheduler/                   ← Go 1.22: Raft leader election, job dispatch, fault recovery
+│   ├── worker/                      ← Go 1.22: job execution, heartbeat, retry logic
+│   └── db/init.sql                  ← schema
+│
+├── live-streaming/                  ← Project 2: live streaming platform
+│   ├── docker-compose.yml           ← all live-streaming services
+│   ├── stream-api/                  ← Go 1.22: REST API, auth, SRS webhooks
+│   ├── chat-service/                ← Go 1.22: WebSocket chat, Redis fanout
+│   ├── srs/srs.conf                 ← SRS media server (RTMP ingest + HLS)
+│   └── nginx/nginx.conf             ← HLS segment server
+│
+└── stock-analytics/                 ← Project 4: daily stock data crawler
+    ├── docker-compose.yml           ← postgres + crawler
+    ├── db/init.sql                  ← schema (symbols, quotes, foreign, fundamentals, news)
+    └── crawler/                     ← Python 3.12: Fireant API crawler, daily scheduler
 ```
 
 ## Projects
@@ -38,6 +50,34 @@ system-design/
 
 Infrastructure: **PostgreSQL :5432**, **Redis :6379**
 
+### job-scheduler (`job-scheduler/docker-compose.yml`)
+
+| Service | Language | Port | Role |
+|---|---|---|---|
+| `job-service` | Go 1.22 | 8085 | REST API — submit, query, cancel jobs |
+| `scheduler-1/2` | Go 1.22 | — | Leader election + job dispatch + fault recovery |
+| `worker-1/2/3` | Go 1.22 | — | Job execution, heartbeat, retry (4 slots each = 12 total) |
+| `frontend` | nginx | 3000 | Dashboard UI (proxies /api/ → job-service) |
+
+Infrastructure: **PostgreSQL :5434**, **Redis :6381**
+
+**Job priority:** 0=critical · 1=high · 2=normal · 3=background
+
+```bash
+# Submit jobs
+curl -X POST http://localhost:8085/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"my-job","payload":"{}","priority":1,"max_retries":3}'
+
+# List jobs
+curl http://localhost:8085/api/jobs?status=RUNNING
+
+# Check workers
+curl http://localhost:8085/api/workers
+```
+
+**Job lifecycle:** PENDING → ASSIGNED → RUNNING → COMPLETED | FAILED → (retry) → DEAD
+
 ### live-streaming (`live-streaming/docker-compose.yml`)
 
 | Service | Language | Port | Role |
@@ -48,6 +88,27 @@ Infrastructure: **PostgreSQL :5432**, **Redis :6379**
 | `nginx-hls` | nginx (Docker image) | 8084 | HLS segment server |
 
 Infrastructure: **PostgreSQL :5433**, **Redis :6380**
+
+### stock-analytics (`stock-analytics/docker-compose.yml`)
+
+| Service | Language | Port | Role |
+|---|---|---|---|
+| `crawler` | Python 3.12 | — | Daily Fireant API crawler; stores to PostgreSQL |
+
+Infrastructure: **PostgreSQL :5435**
+
+**Data collected:** symbols, daily OHLCV, foreign investor flow, quarterly fundamentals, news
+
+**Required:** Set `FIREANT_TOKEN` in `docker-compose.yml` before running.
+Get your token: log into fireant.vn → DevTools → Network → any request → copy `Authorization` header.
+
+```bash
+make run-stock       # start postgres + crawler (waits for scheduled time)
+make crawl-now       # trigger an immediate crawl right now
+make logs-stock      # follow crawler logs
+```
+
+**Tables:** `symbols`, `daily_quotes`, `foreign_trading`, `fundamentals`, `news`, `crawl_runs`
 
 ## Commands
 

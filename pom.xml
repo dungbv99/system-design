@@ -24,5 +24,6 @@
 
     <modules>
         <module>file-storage</module>
+        <module>leetcode</module>
     </modules>
 </project>

@@ -1,5 +1,7 @@
 .PHONY: build run stop clean logs \
         build-live run-live stop-live clean-live logs-live \
+        build-jobs run-jobs stop-jobs clean-jobs logs-jobs \
+        build-stock run-stock stop-stock clean-stock logs-stock crawl-now \
         build-java build-go deps test test-java test-go \
         new-go-service
 
@@ -37,12 +39,55 @@ clean-live:
 logs-live:
 	docker compose -f live-streaming/docker-compose.yml logs -f
 
+# ── job-scheduler (job-scheduler/docker-compose.yml) ─────────────────────
+
+build-jobs:
+	docker compose -f job-scheduler/docker-compose.yml build
+
+run-jobs:
+	docker compose -f job-scheduler/docker-compose.yml up -d
+
+stop-jobs:
+	docker compose -f job-scheduler/docker-compose.yml down
+
+clean-jobs:
+	docker compose -f job-scheduler/docker-compose.yml down -v
+
+logs-jobs:
+	docker compose -f job-scheduler/docker-compose.yml logs -f
+
 # ── Builds without Docker ─────────────────────────────────────────────────
 
 build-java:
 	mvn package -DskipTests
 
 GO_DIRS := file-storage/sync-gateway live-streaming/stream-api live-streaming/chat-service
+
+# ── stock-analytics (stock-analytics/docker-compose.yml) ─────────────────
+
+build-stock:
+	docker compose -f stock-analytics/docker-compose.yml build
+
+run-stock:
+	docker compose -f stock-analytics/docker-compose.yml up -d
+
+stop-stock:
+	docker compose -f stock-analytics/docker-compose.yml down
+
+clean-stock:
+	docker compose -f stock-analytics/docker-compose.yml down -v
+
+logs-stock:
+	docker compose -f stock-analytics/docker-compose.yml logs -f
+
+# Trigger an immediate crawl without waiting for the daily schedule
+crawl-now:
+	docker compose -f stock-analytics/docker-compose.yml run --rm \
+	  -e RUN_NOW=1 crawler python main.py
+
+# Run the React dev server (proxies /api to localhost:8090)
+dev-frontend-stock:
+	cd stock-analytics/frontend && npm install && npm run dev
 
 # ── Frontend (dev only) ───────────────────────────────────────────────────
 

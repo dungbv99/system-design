@@ -1,0 +1,158 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: jobscheduler
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  job-service:
+    build: ./job-service
+    ports:
+      - "8085:8085"
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: jobscheduler
+      REDIS_ADDR: redis:6379
+      PORT: "8085"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Three scheduler instances running Raft leader election.
+  # Majority = 2/3, so one node can crash without losing the ability to elect a leader.
+  # Each node's RAFT_ADDR is the port it listens on; PEERS lists the other two.
+  scheduler-1:
+    build: ./scheduler
+    environment:
+      SCHEDULER_ID: scheduler-1
+      RAFT_ADDR: ":8086"
+      PEERS: "scheduler-2:8086,scheduler-3:8086"
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: jobscheduler
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler-2:
+    build: ./scheduler
+    environment:
+      SCHEDULER_ID: scheduler-2
+      RAFT_ADDR: ":8086"
+      PEERS: "scheduler-1:8086,scheduler-3:8086"
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: jobscheduler
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler-3:
+    build: ./scheduler
+    environment:
+      SCHEDULER_ID: scheduler-3
+      RAFT_ADDR: ":8086"
+      PEERS: "scheduler-1:8086,scheduler-2:8086"
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: jobscheduler
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Three workers — each with 4 execution slots = 12 concurrent jobs total
+  worker-1:
+    build: ./worker
+    environment:
+      WORKER_ID: worker-1
+      SLOTS: "4"
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: jobscheduler
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-2:
+    build: ./worker
+    environment:
+      WORKER_ID: worker-2
+      SLOTS: "4"
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: jobscheduler
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-3:
+    build: ./worker
+    environment:
+      WORKER_ID: worker-3
+      SLOTS: "4"
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: jobscheduler
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    image: nginx:alpine
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - job-service
+
+volumes:
+  pg_data:
