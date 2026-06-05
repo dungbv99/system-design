@@ -287,8 +287,23 @@ class Store:
         with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT date, open, high, low, close, volume
+                SELECT date, open, high, low, close, volume, value
                 FROM daily_quotes
+                WHERE symbol = %s
+                ORDER BY date DESC
+                LIMIT %s
+                """,
+                (symbol.upper(), days),
+            )
+            rows = cur.fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def get_symbol_foreign(self, symbol: str, days: int = 9999) -> list[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT date, buy_vol, sell_vol, net_vol
+                FROM foreign_trading
                 WHERE symbol = %s
                 ORDER BY date DESC
                 LIMIT %s
@@ -315,6 +330,176 @@ class Store:
             )
             rows = cur.fetchall()
         return [dict(r) for r in rows]
+
+    # ── Predictions ──────────────────────────────────────────────────────────
+
+    def upsert_predictions(self, predictions: list) -> int:
+        sql = """
+            INSERT INTO predictions (symbol, predicted_at, horizon_days, score, signal, model_date)
+            VALUES %s
+            ON CONFLICT (symbol, predicted_at, horizon_days) DO UPDATE SET
+                score      = EXCLUDED.score,
+                signal     = EXCLUDED.signal,
+                model_date = EXCLUDED.model_date
+        """
+        rows = [
+            (p.symbol, p.predicted_at, p.horizon_days, p.score, p.signal, p.model_date)
+            for p in predictions
+        ]
+        if not rows:
+            return 0
+        with self._cursor() as cur:
+            psycopg2.extras.execute_values(cur, sql, rows)
+        return len(rows)
+
+    def get_symbol_prediction(self, symbol: str, horizon: int = 5) -> Optional[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM predictions
+                   WHERE symbol = %s AND horizon_days = %s
+                   ORDER BY predicted_at DESC LIMIT 1""",
+                (symbol.upper(), horizon),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_predictions(
+        self,
+        signal: str = "",
+        horizon: int = 5,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        sig_cond  = "AND signal = %s" if signal else ""
+        sig_param: list = [signal.upper()] if signal else []
+
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT ON (symbol) symbol
+                    FROM predictions
+                    WHERE horizon_days = %s {sig_cond}
+                    ORDER BY symbol, predicted_at DESC
+                ) t
+                """,
+                [horizon, *sig_param],
+            )
+            total = cur.fetchone()["count"]
+
+            cur.execute(
+                f"""
+                SELECT l.*, s.name, s.exchange, s.industry,
+                       q.close AS current_price
+                FROM (
+                    SELECT DISTINCT ON (symbol) *
+                    FROM predictions
+                    WHERE horizon_days = %s {sig_cond}
+                    ORDER BY symbol, predicted_at DESC
+                ) l
+                JOIN symbols s ON s.symbol = l.symbol
+                LEFT JOIN LATERAL (
+                    SELECT close FROM daily_quotes
+                    WHERE symbol = l.symbol ORDER BY date DESC LIMIT 1
+                ) q ON true
+                ORDER BY l.score DESC
+                LIMIT %s OFFSET %s
+                """,
+                [horizon, *sig_param, limit, offset],
+            )
+            rows = cur.fetchall()
+        return {"total": total, "items": [dict(r) for r in rows]}
+
+    # ── Wyckoff signals ───────────────────────────────────────────────────────
+
+    def upsert_wyckoff_signal(self, analysis) -> None:
+        sql = """
+            INSERT INTO wyckoff_signals
+                (symbol, analyzed_at, phase, sub_phase, signal, signal_strength,
+                 support, resistance, current_price, last_event,
+                 entry_price, stop_loss, description, bars_analyzed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (symbol) DO UPDATE SET
+                analyzed_at     = EXCLUDED.analyzed_at,
+                phase           = EXCLUDED.phase,
+                sub_phase       = EXCLUDED.sub_phase,
+                signal          = EXCLUDED.signal,
+                signal_strength = EXCLUDED.signal_strength,
+                support         = EXCLUDED.support,
+                resistance      = EXCLUDED.resistance,
+                current_price   = EXCLUDED.current_price,
+                last_event      = EXCLUDED.last_event,
+                entry_price     = EXCLUDED.entry_price,
+                stop_loss       = EXCLUDED.stop_loss,
+                description     = EXCLUDED.description,
+                bars_analyzed   = EXCLUDED.bars_analyzed,
+                updated_at      = NOW()
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (
+                analysis.symbol, analysis.analyzed_at,
+                analysis.phase, analysis.sub_phase,
+                analysis.signal, analysis.signal_strength,
+                analysis.support, analysis.resistance,
+                analysis.current_price, analysis.last_event,
+                analysis.entry_price, analysis.stop_loss,
+                analysis.description, analysis.bars_analyzed,
+            ))
+
+    def get_wyckoff_signal(self, symbol: str) -> Optional[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM wyckoff_signals WHERE symbol = %s",
+                (symbol.upper(),),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_wyckoff_signals(
+        self,
+        signal: str = "",
+        phase: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        conditions: list[str] = []
+        params: list = []
+        if signal:
+            conditions.append("w.signal = %s")
+            params.append(signal.upper())
+        if phase:
+            conditions.append("w.phase ILIKE %s")
+            params.append(f"%{phase}%")
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SELECT COUNT(*) FROM wyckoff_signals w {where}", params)
+            total = cur.fetchone()["count"]
+            cur.execute(
+                f"""
+                SELECT w.*, s.name, s.exchange, s.industry
+                FROM wyckoff_signals w
+                JOIN symbols s ON s.symbol = w.symbol
+                {where}
+                ORDER BY
+                    CASE w.signal
+                        WHEN 'BUY'   THEN 1
+                        WHEN 'SHORT' THEN 2
+                        WHEN 'HOLD'  THEN 3
+                        ELSE 4
+                    END,
+                    CASE w.signal_strength
+                        WHEN 'STRONG'   THEN 1
+                        WHEN 'MODERATE' THEN 2
+                        ELSE 3
+                    END,
+                    w.updated_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                [*params, limit, offset],
+            )
+            rows = cur.fetchall()
+        return {"total": total, "items": [dict(r) for r in rows]}
 
     def get_stats(self) -> dict:
         with self._read() as cur:

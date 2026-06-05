@@ -27,6 +27,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
+import wyckoff as wyckoff_engine
+
 from api import CrawlState, start_server
 from client import FireantClient
 from store import Store
@@ -277,6 +279,79 @@ class Crawler:
         log.info("crawl_symbol done: %s → %s", sym, results)
         return results
 
+    # ── XGBoost prediction ────────────────────────────────────────────────────
+
+    def compute_predictions(
+        self,
+        symbols: list[str] | None = None,
+        exchanges: list[str] | None = None,
+    ):
+        """Train XGBoost on all OHLCV history and persist today's predictions.
+
+        Reads only from the DB (no external API calls).
+        exchanges — defaults to HOSE + HNX if not specified.
+        """
+        if symbols is None:
+            exch = exchanges or ["HOSE", "HNX"]
+            symbols = self.store.get_all_symbols(exchanges=exch)
+        if not symbols:
+            log.warning("compute_predictions: no symbols found")
+            return
+
+        import predict as predict_engine
+        predictor = predict_engine.Predictor(self.store)
+        n = predictor.run(symbols)
+        log.info("compute_predictions: stored %d predictions", n)
+
+    # ── Wyckoff analysis ──────────────────────────────────────────────────────
+
+    def compute_wyckoff(
+        self,
+        symbols: list[str] | None = None,
+        exchanges: list[str] | None = None,
+    ):
+        """Run Wyckoff phase detection for every symbol and persist results.
+
+        Reads the last 180 daily bars per symbol from the DB (no external API
+        calls) and upserts one row per symbol into wyckoff_signals.
+
+        exchanges — if given, only analyse symbols on those exchanges.
+                    Defaults to HOSE + HNX (the two official VN listed boards).
+        """
+        if symbols is None:
+            exch = exchanges or ["HOSE", "HNX"]
+            symbols = self.store.get_all_symbols(exchanges=exch)
+        if not symbols:
+            log.warning("compute_wyckoff: no symbols found")
+            return
+
+        log.info("wyckoff: analysing %d symbols", len(symbols))
+        done = errors = 0
+
+        def analyse_one(sym: str) -> tuple[str, str | None]:
+            try:
+                bars = self.store.get_symbol_quotes(sym, days=180)
+                if not bars:
+                    return sym, "no data"
+                analysis = wyckoff_engine.analyze(sym, bars, lookback=120)
+                self.store.upsert_wyckoff_signal(analysis)
+                return sym, None
+            except Exception as e:
+                return sym, str(e)
+
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            futures = {pool.submit(analyse_one, s): s for s in symbols}
+            for fut in as_completed(futures):
+                sym, err = fut.result()
+                done += 1
+                if err:
+                    errors += 1
+                    log.debug("wyckoff %s: %s", sym, err)
+                if done % 200 == 0:
+                    log.info("wyckoff [%d/%d] errors=%d", done, len(symbols), errors)
+
+        log.info("wyckoff done: %d symbols (%d errors)", done - errors, errors)
+
     # ── Full daily run ────────────────────────────────────────────────────────
 
     def run_daily(self, run_date: date):
@@ -299,6 +374,12 @@ class Crawler:
         if run_date.day == 1:
             log.info("1st of month — crawling fundamentals")
             self.crawl_fundamentals(run_date)
+
+        # Wyckoff phase analysis — pure in-memory, no external calls
+        self.compute_wyckoff()
+
+        # XGBoost predictions — train on history, score today's snapshot
+        self.compute_predictions()
 
         elapsed = time.monotonic() - t0
         log.info("═══ daily crawl complete in %.1fs ═══", elapsed)

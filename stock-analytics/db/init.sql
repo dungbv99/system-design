@@ -79,6 +79,38 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
     error       TEXT
 );
 
+-- ── Wyckoff Analysis Results ──────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS wyckoff_signals (
+    symbol          VARCHAR(50)  PRIMARY KEY REFERENCES symbols(symbol) ON DELETE CASCADE,
+    analyzed_at     TIMESTAMP    NOT NULL,
+    phase           VARCHAR(50)  NOT NULL,   -- Accumulation|Distribution|Markup|Markdown|Unknown
+    sub_phase       VARCHAR(5)   NOT NULL,   -- A|B|C|D|E|-
+    signal          VARCHAR(20)  NOT NULL,   -- BUY|SHORT|WAIT|HOLD
+    signal_strength VARCHAR(20)  NOT NULL,   -- STRONG|MODERATE|WEAK
+    support         NUMERIC(12,2),
+    resistance      NUMERIC(12,2),
+    current_price   NUMERIC(12,2),
+    last_event      VARCHAR(20),             -- SC|Spring|SOS|LPS|BC|UT|LPSY …
+    entry_price     NUMERIC(12,2),           -- optimal entry level
+    stop_loss       NUMERIC(12,2),           -- stop-loss level
+    description     TEXT,
+    bars_analyzed   INT          NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+-- ── XGBoost predictions ───────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS predictions (
+    symbol        VARCHAR(50)  NOT NULL REFERENCES symbols(symbol) ON DELETE CASCADE,
+    predicted_at  DATE         NOT NULL,
+    horizon_days  INT          NOT NULL DEFAULT 5,
+    score         NUMERIC(6,4) NOT NULL,   -- XGBoost BUY probability (0–1)
+    signal        VARCHAR(10)  NOT NULL,   -- BUY | HOLD
+    model_date    DATE         NOT NULL,   -- training-cutoff date for traceability
+    PRIMARY KEY (symbol, predicted_at, horizon_days)
+);
+
 -- ── Indexes ───────────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_daily_quotes_date   ON daily_quotes  (date DESC);
@@ -86,3 +118,7 @@ CREATE INDEX IF NOT EXISTS idx_foreign_date        ON foreign_trading (date DESC
 CREATE INDEX IF NOT EXISTS idx_news_published      ON news          (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_news_symbol         ON news          (symbol);
 CREATE INDEX IF NOT EXISTS idx_crawl_runs_job_date ON crawl_runs    (job, run_date DESC);
+CREATE INDEX IF NOT EXISTS idx_wyckoff_signal      ON wyckoff_signals (signal, signal_strength);
+CREATE INDEX IF NOT EXISTS idx_wyckoff_phase       ON wyckoff_signals (phase);
+CREATE INDEX IF NOT EXISTS idx_predictions_signal  ON predictions   (signal, predicted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_predictions_score   ON predictions   (predicted_at DESC, score DESC);

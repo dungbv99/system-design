@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
-ALL_JOBS = ["symbols", "quotes", "foreign", "news", "fundamentals", "history"]
+ALL_JOBS = ["symbols", "quotes", "foreign", "news", "fundamentals", "history", "wyckoff", "predictions"]
 
 
 # ── Crawl state (shared between API and scheduler threads) ────────────────────
@@ -203,6 +203,141 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
 
         threading.Thread(target=run, daemon=True).start()
         return {"message": "backfill started for symbols with no history"}
+
+    # ── Wyckoff signals ───────────────────────────────────────────────────────
+
+    @app.get("/api/symbols/{symbol}/wyckoff")
+    def symbol_wyckoff(symbol: str):
+        """Return stored Wyckoff analysis for one symbol."""
+        result = store.get_wyckoff_signal(symbol.strip().upper())
+        if not result:
+            raise HTTPException(404, f"No Wyckoff analysis for {symbol.upper()}. "
+                                     "POST /api/symbols/{symbol}/wyckoff to compute.")
+        return result
+
+    @app.post("/api/symbols/{symbol}/wyckoff", status_code=202)
+    def compute_symbol_wyckoff(symbol: str):
+        """Compute and persist Wyckoff analysis for one symbol."""
+        sym = symbol.strip().upper()
+
+        def run():
+            bars = store.get_symbol_quotes(sym, days=180)
+            if not bars:
+                log.warning("wyckoff %s: no quote data", sym)
+                return
+            import wyckoff as w
+            analysis = w.analyze(sym, bars, lookback=120)
+            store.upsert_wyckoff_signal(analysis)
+            log.info("wyckoff %s: phase=%s signal=%s/%s last_event=%s",
+                     sym, analysis.phase, analysis.signal,
+                     analysis.signal_strength, analysis.last_event)
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": f"Wyckoff analysis started for {sym}", "symbol": sym}
+
+    @app.get("/api/wyckoff/signals")
+    def wyckoff_signals(
+        signal: str = "",
+        phase:  str = "",
+        limit:  int = 50,
+        offset: int = 0,
+    ):
+        """
+        List all stored Wyckoff signals, sorted by signal strength.
+
+        Query params:
+          signal — filter by BUY | SHORT | WAIT | HOLD
+          phase  — filter by phase name (partial match)
+          limit  — max results (default 50)
+          offset — pagination offset
+        """
+        return store.get_wyckoff_signals(signal=signal, phase=phase,
+                                         limit=limit, offset=offset)
+
+    @app.post("/api/wyckoff/compute", status_code=202)
+    def compute_all_wyckoff(exchanges: str = "HOSE,HNX"):
+        """
+        Recompute Wyckoff signals (runs in background).
+
+        exchanges — comma-separated list, default HOSE,HNX.
+                    Use 'HOSE,HNX,UPCOM' to include all boards.
+        """
+        if not state.acquire(str(date.today()), ["wyckoff"]):
+            raise HTTPException(409, "A crawl is already running")
+
+        exch_list = [e.strip().upper() for e in exchanges.split(",") if e.strip()]
+
+        def run():
+            try:
+                crawler.compute_wyckoff(exchanges=exch_list)
+            except Exception as e:
+                log.error("wyckoff compute failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": f"Wyckoff analysis started for {exch_list}",
+                "exchanges": exch_list}
+
+    # ── XGBoost predictions ───────────────────────────────────────────────────
+
+    @app.get("/api/symbols/{symbol}/prediction")
+    def symbol_prediction(symbol: str, horizon: int = 5):
+        result = store.get_symbol_prediction(symbol.strip().upper(), horizon)
+        if not result:
+            raise HTTPException(
+                404,
+                f"No prediction for {symbol.upper()}. "
+                "POST /api/predictions/compute to generate.",
+            )
+        return result
+
+    @app.get("/api/predictions")
+    def list_predictions(
+        signal: str = "",
+        horizon: int = 5,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        """
+        List latest XGBoost predictions sorted by score descending.
+
+        Query params:
+          signal  — filter by BUY | HOLD
+          horizon — forecast horizon in days (default 5)
+          limit   — max results (default 50)
+          offset  — pagination offset
+        """
+        return store.get_predictions(
+            signal=signal, horizon=horizon, limit=limit, offset=offset
+        )
+
+    @app.post("/api/predictions/compute", status_code=202)
+    def compute_predictions(exchanges: str = "HOSE,HNX"):
+        """
+        Train XGBoost on all history and generate predictions (runs in background).
+
+        exchanges — comma-separated list, default HOSE,HNX.
+        """
+        if not state.acquire(str(date.today()), ["predictions"]):
+            raise HTTPException(409, "A crawl is already running")
+
+        exch_list = [e.strip().upper() for e in exchanges.split(",") if e.strip()]
+
+        def run():
+            try:
+                import predict as predict_engine
+                symbols   = store.get_all_symbols(exchanges=exch_list)
+                predictor = predict_engine.Predictor(store)
+                n = predictor.run(symbols)
+                log.info("predictions: stored %d rows", n)
+            except Exception as e:
+                log.error("predictions compute failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": f"prediction started for {exch_list}", "exchanges": exch_list}
 
     # ── trigger crawl ─────────────────────────────────────────────────────────
 
