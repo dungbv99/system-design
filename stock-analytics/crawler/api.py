@@ -221,12 +221,12 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         sym = symbol.strip().upper()
 
         def run():
-            bars = store.get_symbol_quotes(sym, days=180)
+            bars = store.get_symbol_quotes(sym, days=300)
             if not bars:
                 log.warning("wyckoff %s: no quote data", sym)
                 return
             import wyckoff as w
-            analysis = w.analyze(sym, bars, lookback=120)
+            analysis = w.analyze(sym, bars, lookback=260)
             store.upsert_wyckoff_signal(analysis)
             log.info("wyckoff %s: phase=%s signal=%s/%s last_event=%s",
                      sym, analysis.phase, analysis.signal,
@@ -255,17 +255,23 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
                                          limit=limit, offset=offset)
 
     @app.post("/api/wyckoff/compute", status_code=202)
-    def compute_all_wyckoff(exchanges: str = "HOSE,HNX"):
+    def compute_all_wyckoff(exchanges: str = ""):
         """
         Recompute Wyckoff signals (runs in background).
 
-        exchanges — comma-separated list, default HOSE,HNX.
-                    Use 'HOSE,HNX,UPCOM' to include all boards.
+        exchanges — comma-separated board list (e.g. 'HOSE,HNX').
+                    Omit it, or pass 'all', to analyse EVERY symbol that has
+                    quote data across all boards (HOSE, HNX, UPCOM, OTC, …).
         """
         if not state.acquire(str(date.today()), ["wyckoff"]):
             raise HTTPException(409, "A crawl is already running")
 
-        exch_list = [e.strip().upper() for e in exchanges.split(",") if e.strip()]
+        raw = exchanges.strip().lower()
+        if raw in ("", "all", "*"):
+            exch_list = None
+        else:
+            exch_list = [e.strip().upper() for e in exchanges.split(",") if e.strip()]
+        scope = "all symbols with quotes" if exch_list is None else exch_list
 
         def run():
             try:
@@ -276,8 +282,37 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
                 state.release()
 
         threading.Thread(target=run, daemon=True).start()
-        return {"message": f"Wyckoff analysis started for {exch_list}",
-                "exchanges": exch_list}
+        return {"message": f"Wyckoff analysis started for {scope}",
+                "exchanges": exch_list or "all"}
+
+    # ── Backtest ──────────────────────────────────────────────────────────────
+
+    @app.get("/api/backtest/{symbol}")
+    def symbol_backtest(
+        symbol:   str,
+        strategy: str = "both",   # signal_replay | event_trades | both
+        lookback: int = 260,
+        horizon:  int = 20,       # max hold (bars) for signal_replay
+        max_hold: int = 60,       # max hold (bars) for event_trades
+        step:     int = 5,        # walk-forward step in bars
+    ):
+        """
+        Walk-forward Wyckoff backtest for one symbol.
+
+        Runs synchronously — may take a few seconds for long histories.
+        Returns signal_replay and/or event_trades result objects.
+        """
+        sym  = symbol.strip().upper()
+        bars = store.get_symbol_quotes(sym, days=9999)
+        if not bars:
+            raise HTTPException(404, f"No price data for {sym}")
+        import backtest as bt
+        result = bt.run_backtest(
+            sym, bars,
+            strategy=strategy, lookback=lookback,
+            horizon=horizon, max_hold=max_hold, step=step,
+        )
+        return result
 
     # ── XGBoost predictions ───────────────────────────────────────────────────
 
@@ -338,6 +373,17 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
 
         threading.Thread(target=run, daemon=True).start()
         return {"message": f"prediction started for {exch_list}", "exchanges": exch_list}
+
+    # ── index / sector compositions ───────────────────────────────────────────
+
+    @app.get("/api/index-compositions")
+    def index_compositions():
+        """Return live index/sector symbol lists from SSI iboard indexGroups."""
+        try:
+            return crawler.client.get_index_compositions()
+        except Exception as e:
+            log.error("index-compositions failed: %s", e)
+            raise HTTPException(502, f"Failed to fetch compositions from SSI: {e}")
 
     # ── trigger crawl ─────────────────────────────────────────────────────────
 

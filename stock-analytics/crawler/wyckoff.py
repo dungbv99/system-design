@@ -6,6 +6,9 @@ Detects Wyckoff phases and key events from OHLCV data:
   Distribution A→E : BC → AR/ST → UT/UTAD → LPSY → Markdown
 
 Signal output: BUY | SHORT | WAIT | HOLD  ×  STRONG | MODERATE | WEAK
+
+VSA labels (in-memory, not persisted):
+  demand | supply | absorption | no_supply | no_demand | normal
 """
 
 from __future__ import annotations
@@ -39,21 +42,22 @@ class WyckoffAnalysis:
     resistance: Optional[float]
     current_price: Optional[float]
     last_event: Optional[str]
-    entry_price: Optional[float]   # optimal buy/short entry level
-    stop_loss: Optional[float]     # stop-loss level
+    entry_price: Optional[float]
+    stop_loss: Optional[float]
     events: list[WyckoffEvent] = field(default_factory=list)
     description: str = ""
     bars_analyzed: int = 0
+    vsa_labels: list[str] = field(default_factory=list)  # one label per bar, in-memory only
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-def analyze(symbol: str, bars: list[dict], lookback: int = 120) -> WyckoffAnalysis:
+def analyze(symbol: str, bars: list[dict], lookback: int = 260) -> WyckoffAnalysis:
     """
     Analyze OHLCV bars and return Wyckoff phase + signal.
 
     bars    — list of {date, open, high, low, close, volume} ordered oldest→newest.
-    lookback — number of recent bars to use (default ≈ 6 months of daily data).
+    lookback — number of recent bars to use (default ≈ 1 year of daily data).
     """
     if not bars or len(bars) < 30:
         return _empty(symbol, "Insufficient data (need ≥ 30 bars)")
@@ -76,13 +80,21 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 120) -> WyckoffAnalys
         abs(closes[i] - opens_[i])
         for i in range(n) if closes[i] > 0 and opens_[i] > 0
     ) or 0.001
+    avg_hl_spread = _mean(
+        highs[i] - lows[i]
+        for i in range(n) if highs[i] > lows[i]
+    ) or 0.001
 
     ma20  = _sma(closes, 20)
     ma50  = _sma(closes, 50)
     ma200 = _sma(closes, min(200, n))
+    rsi   = _rsi(closes, 14)
 
     current_price   = closes[-1]
     overall_uptrend = (ma50[-1] > ma200[-1]) if (ma50 and ma200) else True
+
+    rsi_cur  = rsi[-1]  if rsi  else 50.0
+    rsi_prev = rsi[-2]  if len(rsi) > 1 else rsi_cur
 
     support, resistance = _detect_range(highs, lows, n)
     events = _detect_events(
@@ -97,10 +109,12 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 120) -> WyckoffAnalys
     signal, strength, description = _generate_signal(
         phase, sub_phase, events,
         current_price, support, resistance, ma20_cur,
+        rsi_cur, rsi_prev,
     )
     entry_price, stop_loss = _compute_entry_stop(
         phase, sub_phase, events, support, resistance,
     )
+    vsa_labels = classify_vsa_bars(highs, lows, closes, volumes, avg_vol, avg_hl_spread)
 
     return WyckoffAnalysis(
         symbol=symbol,
@@ -118,14 +132,57 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 120) -> WyckoffAnalys
         events=events,
         description=description,
         bars_analyzed=n,
+        vsa_labels=vsa_labels,
     )
+
+
+# ── VSA bar classification ────────────────────────────────────────────────────
+
+def classify_vsa_bars(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    volumes: list[int],
+    avg_vol: float,
+    avg_hl_spread: float,
+) -> list[str]:
+    """
+    Label each bar with a VSA bar type:
+      demand     — high vol, wide spread, close in upper 60%  → buyers in control
+      supply     — high vol, wide spread, close in lower 40%  → sellers in control
+      absorption — very high vol, narrow spread               → supply being absorbed
+      no_supply  — low vol, narrow spread, close in upper 50% → no selling pressure
+      no_demand  — low vol, narrow spread, close in lower 50% → no buying interest
+      normal     — anything else
+    """
+    labels: list[str] = []
+    for i in range(len(closes)):
+        h, l, c, v = highs[i], lows[i], closes[i], volumes[i]
+        hl = h - l if h > l else 0.001
+        rel_vol    = v / avg_vol        if avg_vol > 0        else 0.0
+        rel_spread = hl / avg_hl_spread if avg_hl_spread > 0  else 0.0
+        close_pos  = (c - l) / hl      if hl > 0             else 0.5
+
+        if rel_vol > 2.0 and rel_spread < 0.7:
+            labels.append("absorption")
+        elif rel_vol > 1.8 and rel_spread > 1.5 and close_pos > 0.6:
+            labels.append("demand")
+        elif rel_vol > 1.8 and rel_spread > 1.5 and close_pos < 0.4:
+            labels.append("supply")
+        elif rel_vol < 0.5 and rel_spread < 0.7 and close_pos > 0.5:
+            labels.append("no_supply")
+        elif rel_vol < 0.5 and rel_spread < 0.7 and close_pos < 0.5:
+            labels.append("no_demand")
+        else:
+            labels.append("normal")
+    return labels
 
 
 # ── Range detection ───────────────────────────────────────────────────────────
 
 def _detect_range(
     highs: list[float], lows: list[float], n: int,
-    range_bars: int = 80, pivot: int = 3,
+    range_bars: int = 120, pivot: int = 3,
 ) -> tuple[float, float]:
     """
     Find horizontal support/resistance using swing pivots.
@@ -266,7 +323,8 @@ def _detect_events(
                 and down
                 and l <= support * 1.07
                 and vol < volumes[idx["SC"]] * 0.85
-                and bars_since("AR", i) >= 3):
+                and bars_since("AR", i) >= 3
+                and bars_since("ST", i) >= 5):
             add("ST", i,
                 f"Secondary Test — re-tests SC area on lower vol {vol:,}")
 
@@ -401,28 +459,49 @@ def _generate_signal(
     support: float,
     resistance: float,
     ma20: float,
+    rsi_cur: float = 50.0,
+    rsi_prev: float = 50.0,
 ) -> tuple[str, str, str]:
+    """
+    Map phase + sub-phase + events to (signal, strength, description).
+
+    RSI(14) filter applied to STRONG signals:
+      BUY  STRONG : requires RSI < 50 and rising  (rsi_cur > rsi_prev)
+      SHORT STRONG: requires RSI > 50 and falling (rsi_cur < rsi_prev)
+    If the RSI condition is not met the signal strength is downgraded to MODERATE.
+    """
     etypes = {e.event_type for e in events}
     has = lambda t: t in etypes
+
+    rsi_buy_ok   = rsi_cur < 50 and rsi_cur > rsi_prev
+    rsi_short_ok = rsi_cur > 50 and rsi_cur < rsi_prev
 
     if phase == "Accumulation":
         if sub_phase == "D":
             if has("LPS"):
-                return ("BUY", "STRONG",
+                desc = (
                     f"Phase D — LPS confirmed after SOS. Ideal buy entry here. "
                     f"Stop loss below LPS low (~{support:.2f}). "
-                    f"Target breakout above resistance {resistance:.2f}.")
-            return ("BUY", "MODERATE",
+                    f"Target breakout above resistance {resistance:.2f}."
+                )
+                strength = "STRONG" if rsi_buy_ok else "MODERATE"
+                return ("BUY", strength, desc)
+            desc = (
                 f"Phase D — SOS confirmed, markup likely. "
                 f"Buy on pullbacks that hold above {support:.2f}. "
-                f"Target {resistance:.2f}+.")
+                f"Target {resistance:.2f}+."
+            )
+            return ("BUY", "MODERATE", desc)
 
         if sub_phase == "C":
             if has("Test"):
-                return ("BUY", "STRONG",
+                desc = (
                     f"Phase C — Spring + Test confirmed. High-probability entry. "
                     f"Buy near {support:.2f}, stop just below Spring low. "
-                    f"Wait for SOS to confirm full markup.")
+                    f"Wait for SOS to confirm full markup."
+                )
+                strength = "STRONG" if rsi_buy_ok else "MODERATE"
+                return ("BUY", strength, desc)
             if has("Spring"):
                 return ("BUY", "MODERATE",
                     f"Phase C — Spring detected. Entry possible, "
@@ -436,15 +515,21 @@ def _generate_signal(
 
     if phase == "Distribution":
         if sub_phase == "D" and has("LPSY"):
-            return ("SHORT", "STRONG",
+            desc = (
                 f"Phase D — LPSY confirmed, markdown imminent. "
                 f"Short here, stop above {resistance:.2f}. "
-                f"Target {support:.2f}.")
+                f"Target {support:.2f}."
+            )
+            strength = "STRONG" if rsi_short_ok else "MODERATE"
+            return ("SHORT", strength, desc)
         if sub_phase == "C":
             if has("UTAD"):
-                return ("SHORT", "STRONG",
+                desc = (
                     f"Phase C — UTAD confirmed (second upthrust). "
-                    f"Strong short signal. Stop above {resistance:.2f}.")
+                    f"Strong short signal. Stop above {resistance:.2f}."
+                )
+                strength = "STRONG" if rsi_short_ok else "MODERATE"
+                return ("SHORT", strength, desc)
             if has("UT"):
                 return ("SHORT", "MODERATE",
                     f"Phase C — Upthrust detected. "
@@ -488,9 +573,9 @@ def _compute_entry_stop(
     Return (entry_price, stop_loss) for actionable signals.
 
     Accumulation BUY:
-      Phase C — Test : entry = Test close  | stop = Spring low × 0.98
+      Phase C — Test : entry = Test close  | stop = Spring low × 0.97
       Phase C — Spring only : entry = Spring close | stop = Spring low × 0.97
-      Phase D — LPS  : entry = LPS close   | stop = Spring low × 0.98
+      Phase D — LPS  : entry = LPS close   | stop = Spring low × 0.97
       Phase D — SOS  : entry = midpoint    | stop = support × 0.97
 
     Distribution SHORT:
@@ -513,7 +598,6 @@ def _compute_entry_stop(
     ut     = last("UTAD") or last("UT")
     lpsy   = last("LPSY")
 
-    # Spring low = the price recorded for the Spring event (close near support)
     spring_stop = spring.price * 0.97 if spring else support * 0.97
 
     if phase == "Accumulation":
@@ -566,6 +650,34 @@ def _sma(values: list[float], period: int) -> list[float]:
     return result
 
 
+def _rsi(closes: list[float], period: int = 14) -> list[float]:
+    """Wilder-smoothed RSI. Returns 50.0 for bars before the warm-up period."""
+    n = len(closes)
+    result = [50.0] * n
+    if n < period + 1:
+        return result
+
+    gains  = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        diff = closes[i] - closes[i - 1]
+        if diff > 0:
+            gains[i] = diff
+        else:
+            losses[i] = -diff
+
+    ag = sum(gains[1 : period + 1])  / period
+    al = sum(losses[1 : period + 1]) / period
+
+    for i in range(period, n):
+        if i > period:
+            ag = (ag * (period - 1) + gains[i])  / period
+            al = (al * (period - 1) + losses[i]) / period
+        result[i] = 100.0 - (100.0 / (1.0 + ag / al)) if al > 0 else 100.0
+
+    return result
+
+
 def _percentile(values: list[float], pct: int) -> float:
     if not values:
         return 0.0
@@ -592,4 +704,5 @@ def _empty(symbol: str, reason: str) -> WyckoffAnalysis:
         events=[],
         description=reason,
         bars_analyzed=0,
+        vsa_labels=[],
     )

@@ -136,7 +136,7 @@ class Crawler:
                 done += 1
                 if err:
                     errors += 1
-                    log.debug("[%d/%d] %s: %s", done, len(symbols), sym, err)
+                    log.warning("[%d/%d] %s: %s", done, len(symbols), sym, err)
                 else:
                     total += n
                 if done % 100 == 0:
@@ -153,7 +153,7 @@ class Crawler:
         Called automatically after crawl_symbols so that newly listed tickers
         get their history populated without any manual intervention.
         """
-        symbols = self.store.get_symbols_without_quotes(exchanges=self.CRAWL_EXCHANGES)
+        symbols = self.store.get_symbols_without_quotes()
         if not symbols:
             log.info("crawl_missing_history: all symbols already have data")
             return
@@ -229,15 +229,21 @@ class Crawler:
     # ── Incremental update (last crawled date → today) ───────────────────────
 
     def crawl_update(self, today: date):
-        """Fetch OHLCV for all HOSE/HNX/UPCOM symbols from the day after the
-        latest stored quote up to today.  No-ops if already up to date."""
-        last = self.store.get_latest_quote_date()
+        """Re-fetch OHLCV for all symbols up to today and upsert.
+
+        Always runs — ON CONFLICT (symbol, date) DO UPDATE means existing rows
+        are overwritten with fresh data, so this is safe to call multiple times
+        per day (e.g. to pick up final closing prices after an intraday fetch).
+        Goes back one extra day to catch any late API corrections.
+        """
+        last  = self.store.get_latest_quote_date()
         start = (last - timedelta(days=1)) if last else self.HISTORY_START
-        if start > today:
-            log.info("crawl_update: already up to date (latest=%s)", last)
-            return
         log.info("crawl_update: %s → %s", start, today)
-        self._crawl_quotes_range(start, today, job_label="update")
+        # Use all symbols that already have price data — the exchange field is
+        # empty for most symbols returned by Vietcap, so an exchange filter
+        # would silently skip ~1700 major stocks (VCB, HPG, ACB, etc.).
+        symbols = self.store.get_symbols_with_quotes()
+        self._crawl_quotes_range(start, today, job_label="update", symbols=symbols)
 
     # ── Per-symbol on-demand crawl ────────────────────────────────────────────
 
@@ -312,15 +318,21 @@ class Crawler:
     ):
         """Run Wyckoff phase detection for every symbol and persist results.
 
-        Reads the last 180 daily bars per symbol from the DB (no external API
+        Reads the last 300 daily bars per symbol from the DB (no external API
         calls) and upserts one row per symbol into wyckoff_signals.
 
+        symbols   — explicit list to analyse; overrides exchanges.
         exchanges — if given, only analyse symbols on those exchanges.
-                    Defaults to HOSE + HNX (the two official VN listed boards).
+                    If omitted, analyses EVERY symbol that has quote data
+                    (all boards — HOSE, HNX, UPCOM, OTC, unclassified).
         """
         if symbols is None:
-            exch = exchanges or ["HOSE", "HNX"]
-            symbols = self.store.get_all_symbols(exchanges=exch)
+            if exchanges:
+                symbols = self.store.get_all_symbols(exchanges=exchanges)
+            else:
+                # "all symbols" = every symbol that actually has bars in
+                # daily_quotes, regardless of exchange classification.
+                symbols = self.store.get_symbols_with_quotes()
         if not symbols:
             log.warning("compute_wyckoff: no symbols found")
             return
@@ -330,10 +342,10 @@ class Crawler:
 
         def analyse_one(sym: str) -> tuple[str, str | None]:
             try:
-                bars = self.store.get_symbol_quotes(sym, days=180)
+                bars = self.store.get_symbol_quotes(sym, days=300)
                 if not bars:
                     return sym, "no data"
-                analysis = wyckoff_engine.analyze(sym, bars, lookback=120)
+                analysis = wyckoff_engine.analyze(sym, bars, lookback=260)
                 self.store.upsert_wyckoff_signal(analysis)
                 return sym, None
             except Exception as e:
@@ -409,6 +421,7 @@ def previous_trading_day() -> date:
 def main():
     log.info("connecting to database…")
     store   = Store(DB_DSN)
+    store.cleanup_stale_runs()      # mark any jobs left running by a prior crash
     client  = FireantClient()       # no token needed — uses vnstock public data
     crawler = Crawler(client, store)
     state   = CrawlState()

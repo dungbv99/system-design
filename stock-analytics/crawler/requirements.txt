@@ -6,3 +6,5 @@ xgboost>=2.0
 scikit-learn>=1.4
 pandas>=2.0
 numpy>=1.26
+curl-cffi>=0.7
+pytest>=8.0

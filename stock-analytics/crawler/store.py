@@ -103,6 +103,12 @@ class Store:
                 )
             return [r[0] for r in cur.fetchall()]
 
+    def get_symbols_with_quotes(self) -> list[str]:
+        """Return all symbols that have at least one row in daily_quotes."""
+        with self._read() as cur:
+            cur.execute("SELECT DISTINCT symbol FROM daily_quotes ORDER BY symbol")
+            return [r[0] for r in cur.fetchall()]
+
     # ── Daily quotes ──────────────────────────────────────────────────────────
 
     def upsert_quotes(self, symbol: str, quotes: list[DailyQuote]) -> int:
@@ -117,11 +123,12 @@ class Store:
                 volume = EXCLUDED.volume,
                 value  = EXCLUDED.value
         """
-        rows = []
+        by_date: dict = {}
         for q in quotes:
             d = _parse_date(q.date)
             if d and (q.open or q.close):
-                rows.append((symbol, d, q.open, q.high, q.low, q.close, q.volume, q.value))
+                by_date[d] = (symbol, d, q.open, q.high, q.low, q.close, q.volume, q.value)
+        rows = list(by_date.values())
         if not rows:
             return 0
         with self._cursor() as cur:
@@ -223,6 +230,22 @@ class Store:
                 (status, records, error, run_id),
             )
 
+    def cleanup_stale_runs(self) -> int:
+        """Mark any runs still in 'running' state as error (interrupted by restart)."""
+        with self._cursor() as cur:
+            cur.execute(
+                """UPDATE crawl_runs
+                   SET status = 'error', finished_at = NOW(),
+                       error = 'interrupted: process restarted'
+                   WHERE status = 'running'
+                   RETURNING id"""
+            )
+            rows = cur.fetchall()
+        count = len(rows)
+        if count:
+            log.info("startup: cleaned %d stale running jobs", count)
+        return count
+
     def get_symbols_with_prices(
         self,
         q: str = "",
@@ -232,13 +255,16 @@ class Store:
         symbols: list[str] | None = None,
     ) -> dict:
         search = f"%{q}%" if q else "%"
-        exc_filter = exchange.upper() if exchange else None
+        exc_list = [e.strip().upper() for e in exchange.split(",") if e.strip()] if exchange else []
 
         conditions = ["(s.symbol ILIKE %s OR s.name ILIKE %s)"]
         params_where: list = [search, search]
-        if exc_filter:
+        if len(exc_list) == 1:
             conditions.append("s.exchange = %s")
-            params_where.append(exc_filter)
+            params_where.append(exc_list[0])
+        elif exc_list:
+            conditions.append("s.exchange = ANY(%s)")
+            params_where.append(exc_list)
         if symbols:
             conditions.append("s.symbol = ANY(%s)")
             params_where.append(symbols)
