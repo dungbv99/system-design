@@ -2,11 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Stats, CrawlStatus, CrawlRun } from './types'
 import { api } from './api'
 import { StatCard } from './components/ui'
-import { MarketTab }   from './tabs/MarketTab'
-import { VnBoardTab }  from './tabs/VnBoardTab'
-import { WyckoffTab }  from './tabs/WyckoffTab'
-import { CrawlTab }    from './tabs/CrawlTab'
-import { HistoryTab }  from './tabs/HistoryTab'
+import { MarketTab }    from './tabs/MarketTab'
+import { VnBoardTab }   from './tabs/VnBoardTab'
+import { IndustryTab }  from './tabs/IndustryTab'
+import { WyckoffTab }   from './tabs/WyckoffTab'
+import { MultiFactorTab } from './tabs/MultiFactorTab'
+import { BuyNowTab }    from './tabs/BuyNowTab'
+import { StrongBuyTab } from './tabs/StrongBuyTab'
+import { PortfolioTab } from './tabs/PortfolioTab'
+import { BacktestTab }  from './tabs/BacktestTab'
+import { CrawlTab }     from './tabs/CrawlTab'
+import { HistoryTab }   from './tabs/HistoryTab'
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
@@ -14,7 +20,7 @@ export default function App() {
   const [stats,       setStats]       = useState<Stats | null>(null)
   const [crawlStatus, setCrawlStatus] = useState<CrawlStatus | null>(null)
   const [runs,        setRuns]        = useState<CrawlRun[]>([])
-  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'wyckoff' | 'crawl' | 'history'>('market')
+  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'industry' | 'wyckoff' | 'multifactor' | 'buynow' | 'strongbuy' | 'portfolio' | 'backtest' | 'crawl' | 'history'>('market')
   const [now,         setNow]         = useState(() => new Date())
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -43,11 +49,17 @@ export default function App() {
   const isRunning = crawlStatus?.running ?? false
 
   const TABS = [
-    { id: 'market',  label: '📈 Market'  },
-    { id: 'board',   label: '📊 VN Board' },
-    { id: 'wyckoff', label: '〜 Wyckoff' },
-    { id: 'crawl',   label: isRunning ? '⏳ Crawl' : '▶ Crawl' },
-    { id: 'history', label: '📋 History' },
+    { id: 'market',   label: '📈 Market'    },
+    { id: 'board',    label: '📊 VN Board'  },
+    { id: 'industry', label: '🏭 Industry'  },
+    { id: 'wyckoff',  label: '〜 Wyckoff'   },
+    { id: 'multifactor', label: '⚖ Multi-Factor' },
+    { id: 'buynow',   label: '🎯 Buy Now'   },
+    { id: 'strongbuy', label: '🔥 Strong Buy' },
+    { id: 'portfolio', label: '💼 Portfolio' },
+    { id: 'backtest', label: '⏪ Backtest'  },
+    { id: 'crawl',    label: isRunning ? '⏳ Crawl' : '▶ Crawl' },
+    { id: 'history',  label: '📋 History'  },
   ] as const
 
   const lastRunAccent = stats?.last_run?.status === 'done'
@@ -128,9 +140,15 @@ export default function App() {
 
       {/* ── Main content ────────────────────────────────────────────────── */}
       <main className="px-6 py-5 max-w-screen-xl mx-auto">
-        {activeTab === 'market'  && <MarketTab />}
-        {activeTab === 'board'   && <VnBoardTab />}
-        {activeTab === 'wyckoff' && <WyckoffTab />}
+        {activeTab === 'market'   && <MarketTab />}
+        {activeTab === 'board'    && <VnBoardTab />}
+        {activeTab === 'industry' && <IndustryTab />}
+        {activeTab === 'wyckoff'  && <WyckoffTab />}
+        {activeTab === 'multifactor' && <MultiFactorTab />}
+        {activeTab === 'buynow'   && <BuyNowTab />}
+        {activeTab === 'strongbuy' && <StrongBuyTab />}
+        {activeTab === 'portfolio' && <PortfolioTab />}
+        {activeTab === 'backtest' && <BacktestTab />}
         {activeTab === 'crawl'   && <CrawlTab crawlStatus={crawlStatus} isRunning={isRunning} onRefresh={refresh} />}
         {activeTab === 'history' && <HistoryTab runs={runs} />}
       </main>

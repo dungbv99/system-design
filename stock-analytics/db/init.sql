@@ -99,6 +99,38 @@ CREATE TABLE IF NOT EXISTS wyckoff_signals (
     updated_at      TIMESTAMP    NOT NULL DEFAULT NOW()
 );
 
+-- ── Multi-Factor Signals ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS multifactor_signals (
+    symbol           VARCHAR(50)   PRIMARY KEY REFERENCES symbols(symbol) ON DELETE CASCADE,
+    analyzed_at      TIMESTAMPTZ   NOT NULL,
+    total_score      INTEGER       NOT NULL,
+    signal           VARCHAR(10)   NOT NULL,    -- BUY | WATCH | AVOID
+    confidence       VARCHAR(10),               -- HIGH | MEDIUM | LOW
+    factors_agreed   INTEGER,                   -- 0–4
+    trend_score      INTEGER,
+    momentum_score   INTEGER,
+    volume_score     INTEGER,
+    position_score   INTEGER,
+    trend_reason     TEXT,
+    momentum_reason  TEXT,
+    volume_reason    TEXT,
+    position_reason  TEXT,
+    current_price    NUMERIC(12, 2),
+    support          NUMERIC(12, 2),
+    resistance       NUMERIC(12, 2),
+    entry_price      NUMERIC(12, 2),
+    stop_loss        NUMERIC(12, 2),
+    description      TEXT,
+    bars_analyzed    INTEGER,
+    updated_at       TIMESTAMPTZ   DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mf_signal     ON multifactor_signals (signal);
+CREATE INDEX IF NOT EXISTS idx_mf_score      ON multifactor_signals (total_score DESC);
+CREATE INDEX IF NOT EXISTS idx_mf_updated    ON multifactor_signals (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mf_confidence ON multifactor_signals (confidence);
+
 -- ── XGBoost predictions ───────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS predictions (
@@ -109,6 +141,27 @@ CREATE TABLE IF NOT EXISTS predictions (
     signal        VARCHAR(10)  NOT NULL,   -- BUY | HOLD
     model_date    DATE         NOT NULL,   -- training-cutoff date for traceability
     PRIMARY KEY (symbol, predicted_at, horizon_days)
+);
+
+-- ── Paper trades (assumed buys, for performance review) ───────────────────────
+
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id          BIGSERIAL     PRIMARY KEY,
+    symbol      VARCHAR(50)   NOT NULL REFERENCES symbols(symbol) ON DELETE CASCADE,
+    buy_date    DATE          NOT NULL DEFAULT CURRENT_DATE,
+    buy_price   NUMERIC(12,2) NOT NULL,
+    quantity    INTEGER       NOT NULL DEFAULT 1000,
+    -- snapshot of the Wyckoff plan at buy time (optional)
+    entry_price NUMERIC(12,2),
+    stop_loss   NUMERIC(12,2),
+    target      NUMERIC(12,2),
+    phase       VARCHAR(50),
+    signal      VARCHAR(20),
+    note        TEXT,
+    status      VARCHAR(10)   NOT NULL DEFAULT 'OPEN',  -- OPEN | CLOSED
+    close_date  DATE,
+    close_price NUMERIC(12,2),
+    created_at  TIMESTAMP     NOT NULL DEFAULT NOW()
 );
 
 -- ── Indexes ───────────────────────────────────────────────────────────────────
@@ -122,3 +175,5 @@ CREATE INDEX IF NOT EXISTS idx_wyckoff_signal      ON wyckoff_signals (signal, s
 CREATE INDEX IF NOT EXISTS idx_wyckoff_phase       ON wyckoff_signals (phase);
 CREATE INDEX IF NOT EXISTS idx_predictions_signal  ON predictions   (signal, predicted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_predictions_score   ON predictions   (predicted_at DESC, score DESC);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_status  ON paper_trades  (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_symbol  ON paper_trades  (symbol);

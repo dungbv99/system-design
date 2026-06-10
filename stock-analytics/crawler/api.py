@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
-ALL_JOBS = ["symbols", "quotes", "foreign", "news", "fundamentals", "history", "wyckoff", "predictions"]
+ALL_JOBS = ["symbols", "quotes", "foreign", "news", "fundamentals", "history", "wyckoff", "multifactor", "predictions"]
 
 
 # ── Crawl state (shared between API and scheduler threads) ────────────────────
@@ -66,6 +66,13 @@ class CrawlRequest(BaseModel):
     date:  date
     jobs:  list[str] = ["symbols", "quotes", "foreign", "news"]
     years: int       = 0   # 0 = all time (from 2000-01-01); N = last N years
+
+
+class BuyRequest(BaseModel):
+    symbol:    str
+    quantity:  int            = 1000
+    buy_price: Optional[float] = None   # None → assume buy at latest close
+    note:      Optional[str]   = None
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -284,6 +291,141 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         threading.Thread(target=run, daemon=True).start()
         return {"message": f"Wyckoff analysis started for {scope}",
                 "exchanges": exch_list or "all"}
+
+    # ── Multi-factor signals ──────────────────────────────────────────────────
+
+    @app.get("/api/symbols/{symbol}/multifactor")
+    def symbol_multifactor(symbol: str):
+        """Return stored multi-factor analysis for one symbol."""
+        result = store.get_multifactor_signal(symbol.strip().upper())
+        if not result:
+            raise HTTPException(404, f"No multi-factor analysis for {symbol.upper()}. "
+                                     "POST /api/symbols/{symbol}/multifactor to compute.")
+        return result
+
+    @app.post("/api/symbols/{symbol}/multifactor", status_code=202)
+    def compute_symbol_multifactor(symbol: str):
+        """Compute and persist multi-factor analysis for one symbol."""
+        sym = symbol.strip().upper()
+
+        def run():
+            bars = store.get_symbol_quotes(sym, days=300)
+            if not bars:
+                log.warning("multifactor %s: no quote data", sym)
+                return
+            import multi_factor as mf
+            analysis = mf.analyze(sym, bars)
+            store.upsert_multifactor_signal(analysis)
+            log.info("multifactor %s: signal=%s/%s score=%d agreed=%d",
+                     sym, analysis.signal, analysis.confidence,
+                     analysis.total_score, analysis.factors_agreed)
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": f"Multi-factor analysis started for {sym}", "symbol": sym}
+
+    @app.get("/api/multifactor/signals")
+    def multifactor_signals(
+        signal:     str = "",
+        min_score:  int = 0,
+        confidence: str = "",
+        limit:      int = 50,
+        offset:     int = 0,
+    ):
+        """
+        List all stored multi-factor signals, sorted by total score descending.
+
+        Query params:
+          signal     — filter by BUY | WATCH | AVOID
+          min_score  — minimum total_score (0–100)
+          confidence — filter by HIGH | MEDIUM | LOW
+          limit      — max results (default 50)
+          offset     — pagination offset
+        """
+        return store.get_multifactor_signals(
+            signal=signal, min_score=min_score, confidence=confidence,
+            limit=limit, offset=offset,
+        )
+
+    @app.post("/api/multifactor/compute", status_code=202)
+    def compute_all_multifactor(exchanges: str = ""):
+        """
+        Recompute multi-factor signals (runs in background).
+
+        exchanges — comma-separated board list (e.g. 'HOSE,HNX').
+                    Omit it, or pass 'all', to analyse EVERY symbol that has
+                    quote data across all boards.
+        """
+        if not state.acquire(str(date.today()), ["multifactor"]):
+            raise HTTPException(409, "A crawl is already running")
+
+        raw = exchanges.strip().lower()
+        if raw in ("", "all", "*"):
+            exch_list = None
+        else:
+            exch_list = [e.strip().upper() for e in exchanges.split(",") if e.strip()]
+        scope = "all symbols with quotes" if exch_list is None else exch_list
+
+        def run():
+            try:
+                crawler.compute_multifactor(exchanges=exch_list)
+            except Exception as e:
+                log.error("multifactor compute failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": f"Multi-factor analysis started for {scope}",
+                "exchanges": exch_list or "all"}
+
+    # ── Paper trades (assumed buys, performance review) ───────────────────────
+
+    @app.get("/api/portfolio")
+    def list_portfolio(status: str = ""):
+        """List assumed buys with live performance. status=OPEN|CLOSED to filter."""
+        return store.list_paper_trades(status=status.strip().upper())
+
+    @app.post("/api/portfolio", status_code=201)
+    def add_portfolio(req: BuyRequest):
+        sym = req.symbol.strip().upper()
+        if not sym:
+            raise HTTPException(400, "Symbol must not be empty")
+        if req.quantity <= 0:
+            raise HTTPException(400, "Quantity must be positive")
+
+        buy_price = req.buy_price
+        if buy_price is None:
+            buy_price = store.get_latest_close(sym)
+            if buy_price is None:
+                raise HTTPException(404, f"No price data for {sym} to assume a buy")
+
+        # Snapshot the current Wyckoff plan (entry/stop/target) for later review.
+        wy = store.get_wyckoff_signal(sym) or {}
+        trade_id = store.add_paper_trade(
+            symbol=sym,
+            buy_price=buy_price,
+            quantity=req.quantity,
+            entry_price=wy.get("entry_price"),
+            stop_loss=wy.get("stop_loss"),
+            target=wy.get("resistance"),
+            phase=wy.get("phase"),
+            signal=wy.get("signal"),
+            note=req.note,
+        )
+        log.info("paper trade #%d: BUY %d %s @ %.2f", trade_id, req.quantity, sym, buy_price)
+        return {"id": trade_id, "symbol": sym, "buy_price": buy_price, "quantity": req.quantity}
+
+    @app.post("/api/portfolio/{trade_id}/close", status_code=200)
+    def close_portfolio(trade_id: int):
+        mark = store.close_paper_trade(trade_id)
+        if mark is None:
+            raise HTTPException(409, "Trade not found, already closed, or has no price data")
+        return {"id": trade_id, "close_price": mark}
+
+    @app.delete("/api/portfolio/{trade_id}", status_code=200)
+    def delete_portfolio(trade_id: int):
+        if not store.delete_paper_trade(trade_id):
+            raise HTTPException(404, "Trade not found")
+        return {"id": trade_id, "deleted": True}
 
     # ── Backtest ──────────────────────────────────────────────────────────────
 

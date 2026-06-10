@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Quote, WyckoffSignal } from '../types'
+import type { Quote, WyckoffSignal, Prediction } from '../types'
 import { api } from '../api'
 import { DEFAULT_INDICATORS } from '../indicators/defs'
 import { fmtPrice } from '../utils'
@@ -179,6 +179,145 @@ function WyckoffPanel({ symbol }: { symbol: string }) {
   )
 }
 
+// ── XGB prediction panel ──────────────────────────────────────────────────────
+
+const TOP_FEATURES = [
+  { name: '5-day return',  weight: 0.157, desc: 'recent momentum' },
+  { name: '1-day return',  weight: 0.131, desc: 'latest session' },
+  { name: 'vs MA-20',      weight: 0.107, desc: 'proximity to trend mean' },
+  { name: '60-day return', weight: 0.102, desc: 'medium-term trend' },
+  { name: 'vs MA-60',      weight: 0.099, desc: 'long-term alignment' },
+]
+
+function XGBPanel({ symbol }: { symbol: string }) {
+  const [data,      setData]      = useState<Prediction | null>(null)
+  const [loading,   setLoading]   = useState(true)
+  const [err,       setErr]       = useState(false)
+  const [computing, setComputing] = useState(false)
+
+  const load = useCallback(() => {
+    setLoading(true); setErr(false)
+    api.prediction(symbol)
+      .then(d => { setData(d); setLoading(false) })
+      .catch(() => { setErr(true); setLoading(false) })
+  }, [symbol])
+
+  useEffect(() => { load() }, [load])
+
+  const handleCompute = async () => {
+    setComputing(true)
+    try {
+      await api.computePredictions('HOSE,HNX')
+      setTimeout(load, 15000)
+    } catch {
+      setErr(true)
+    } finally {
+      setComputing(false)
+    }
+  }
+
+  if (loading) return (
+    <div className="animate-pulse text-xs text-[#8b949e] py-6 text-center">
+      Loading XGBoost prediction…
+    </div>
+  )
+  if (err || !data) return (
+    <div className="text-xs text-[#8b949e] py-6 text-center space-y-2">
+      <div>No prediction found for <span className="text-[#e6edf3] font-semibold">{symbol}</span>.</div>
+      <button
+        onClick={handleCompute}
+        disabled={computing}
+        className="text-[#58a6ff] hover:underline disabled:opacity-50"
+      >
+        {computing ? 'Computing (takes ~30s)…' : 'Compute predictions now'}
+      </button>
+    </div>
+  )
+
+  const isBuy = data.signal === 'BUY'
+  const pct   = Math.round(data.score * 100)
+
+  return (
+    <div className="space-y-4">
+
+      {/* ── Signal + confidence ─────────────────────────────────────────── */}
+      <div className="flex items-center gap-4 flex-wrap">
+        <span className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-bold
+          ${isBuy
+            ? 'bg-emerald-950 text-emerald-300 border-emerald-600'
+            : 'bg-[#21262d] text-[#8b949e] border-[#30363d]'}`}>
+          {isBuy ? '▲' : '■'} {data.signal}
+        </span>
+        <div>
+          <div className={`text-3xl font-bold tabular-nums leading-none ${isBuy ? 'text-emerald-300' : 'text-[#8b949e]'}`}>
+            {pct}%
+          </div>
+          <div className="text-[10px] text-[#8b949e] mt-0.5">BUY probability</div>
+        </div>
+        <div className="ml-auto text-right text-[11px] text-[#8b949e] space-y-0.5">
+          <div>Horizon: <span className="text-[#e6edf3]">5 trading days</span></div>
+          <div>Target: <span className="text-[#e6edf3]">+3% return</span></div>
+          <div className="text-[10px] opacity-60">Model trained {data.model_date}</div>
+        </div>
+      </div>
+
+      {/* ── Score gauge ─────────────────────────────────────────────────── */}
+      <div>
+        <div className="relative h-3 rounded-full bg-[#21262d] overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${isBuy ? 'bg-emerald-500' : 'bg-[#444]'}`}
+            style={{ width: `${pct}%` }}
+          />
+          {/* BUY threshold line at 55% */}
+          <div className="absolute top-0 bottom-0 w-0.5 bg-[#58a6ff]/70" style={{ left: '55%' }} />
+        </div>
+        <div className="flex justify-between text-[10px] mt-1 text-[#8b949e]">
+          <span>0%</span>
+          <span className="text-[#58a6ff]">55% BUY threshold</span>
+          <span>100%</span>
+        </div>
+      </div>
+
+      {/* ── Top features ────────────────────────────────────────────────── */}
+      <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-3 space-y-2">
+        <div className="text-[11px] font-semibold text-[#8b949e] uppercase tracking-wider mb-1">
+          Top model features
+        </div>
+        {TOP_FEATURES.map(f => (
+          <div key={f.name} className="flex items-center gap-2">
+            <span className="text-[11px] text-[#e6edf3] w-28 shrink-0">{f.name}</span>
+            <div className="flex-1 h-1.5 rounded-full bg-[#30363d] overflow-hidden">
+              <div className="h-full rounded-full bg-purple-500/70" style={{ width: `${f.weight * 550}%` }} />
+            </div>
+            <span className="text-[10px] text-[#8b949e] w-7 text-right">{Math.round(f.weight * 100)}%</span>
+            <span className="text-[10px] text-[#8b949e]/50 hidden sm:block w-36">{f.desc}</span>
+          </div>
+        ))}
+        <div className="text-[10px] text-[#8b949e]/40 pt-1 border-t border-[#30363d]">
+          Also uses ceiling hits, foreign flow, RSI, MACD, Bollinger bands (VN-specific model)
+        </div>
+      </div>
+
+      {/* ── Interpretation ──────────────────────────────────────────────── */}
+      <div className={`text-xs px-3 py-2.5 rounded-lg border leading-relaxed
+        ${isBuy
+          ? 'bg-emerald-950/30 border-emerald-800 text-emerald-200'
+          : 'bg-[#0d1117] border-[#30363d] text-[#8b949e]'}`}>
+        {isBuy
+          ? `Model gives ${pct}% probability that ${symbol} returns +3%+ within 5 days. ` +
+            `Verify with Wyckoff phase before entering — strong setups combine BUY signal + Accumulation phase C/D.`
+          : `Confidence below 55% threshold (${pct}%). ${symbol} does not show a sufficient momentum pattern. ` +
+            `Wait for a higher-probability setup or check Wyckoff for context.`
+        }
+      </div>
+
+      <div className="text-[10px] text-[#8b949e]/40 text-right">
+        Predicted {data.predicted_at} · XGBoost classifier · T+2.5 settlement · not financial advice
+      </div>
+    </div>
+  )
+}
+
 interface Props {
   symbol:  string
   name:    string
@@ -192,8 +331,25 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
   const [showPicker,   setShowPicker]   = useState(false)
   const [fetchingHist, setFetchingHist] = useState(false)
   const [fetchMsg,     setFetchMsg]     = useState<string | null>(null)
-  const [activePanel,  setActivePanel]  = useState<'chart' | 'wyckoff'>('chart')
+  const [activePanel,  setActivePanel]  = useState<'chart' | 'wyckoff' | 'xgb'>('chart')
+  const [buying,       setBuying]       = useState(false)
+  const [buyMsg,       setBuyMsg]       = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollCountRef = useRef(0)
+
+  const handleAssumeBuy = async () => {
+    setBuying(true)
+    setBuyMsg(null)
+    try {
+      const r = await api.buyStock(symbol, 1000)
+      setBuyMsg(`✓ Bought 1,000 ${symbol} @ ${fmtPrice(r.buy_price)} — see Portfolio tab.`)
+      setTimeout(() => setBuyMsg(null), 5000)
+    } catch (e) {
+      setBuyMsg(e instanceof Error ? `✕ ${e.message}` : '✕ Buy failed')
+    } finally {
+      setBuying(false)
+    }
+  }
 
   const loadQuotes = useCallback(() => {
     setLoading(true)
@@ -202,23 +358,29 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
 
   useEffect(() => { loadQuotes() }, [loadQuotes])
 
-  useEffect(() => {
-    if (quotes.length > 0 && pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-      setFetchMsg(null)
-    }
-  }, [quotes.length])
-
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
+  // Re-crawl the full (dividend-adjusted) history from the source, then reload
+  // the chart. Used both to fill an empty chart and to re-sync prices after a
+  // dividend/split has shifted the adjusted series.
   const handleFetchHistory = async () => {
     setFetchingHist(true)
-    setFetchMsg(null)
+    setFetchMsg('Re-fetching adjusted history… updating chart.')
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollCountRef.current = 0
     try {
       await api.fetchHistory(symbol)
-      setFetchMsg('Fetching history… this may take a few seconds.')
-      pollRef.current = setInterval(loadQuotes, 3000)
+      // The crawl runs in the background (~3-10s). Poll a handful of times so
+      // we pick up the freshly-adjusted rows regardless of how many we already had.
+      pollRef.current = setInterval(() => {
+        pollCountRef.current += 1
+        loadQuotes()
+        if (pollCountRef.current >= 4 && pollRef.current) {
+          clearInterval(pollRef.current)
+          pollRef.current = null
+          setFetchMsg(null)
+        }
+      }, 3000)
     } catch {
       setFetchMsg('Request failed — check crawler logs.')
     } finally {
@@ -245,28 +407,57 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
             <div className="text-xs text-[#8b949e] mt-0.5 max-w-xs truncate">{name}</div>
           </div>
           <div className="flex items-center gap-2 ml-4">
+            {/* Assume buy — record a 1,000-share paper trade at the latest close */}
+            <button
+              onClick={handleAssumeBuy}
+              disabled={buying}
+              title="Assume you buy 1,000 shares now at the latest close, then track it on the Portfolio tab"
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all
+                disabled:opacity-50 disabled:cursor-not-allowed
+                ${buying
+                  ? 'bg-emerald-950 border-emerald-700 text-emerald-300 animate-pulse'
+                  : 'bg-emerald-700 border-emerald-600 text-white hover:bg-emerald-600 hover:scale-105 active:scale-95'}`}>
+              {buying ? '…' : '▸ Assume Buy 1,000'}
+            </button>
             {/* Panel switcher */}
-            {(['chart', 'wyckoff'] as const).map(p => (
-              <button key={p} onClick={() => setActivePanel(p)}
+            {([
+              { id: 'chart',   label: '📈 Chart'   },
+              { id: 'wyckoff', label: '〜 Wyckoff'  },
+              { id: 'xgb',     label: '🤖 XGB Pred' },
+            ] as const).map(({ id, label }) => (
+              <button key={id} onClick={() => setActivePanel(id)}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
-                  ${activePanel === p
+                  ${activePanel === id
                     ? 'bg-[#21262d] border-[#58a6ff] text-[#58a6ff]'
                     : 'border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}>
-                {p === 'chart' ? '📈 Chart' : '〜 Wyckoff'}
+                {label}
               </button>
             ))}
             {activePanel === 'chart' && (
-              <button
-                onClick={() => setShowPicker(p => !p)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
-                  ${showPicker
-                    ? 'bg-blue-950 border-[#58a6ff] text-[#58a6ff]'
-                    : 'bg-[#21262d] border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}>
-                <span>⊕</span> Chỉ báo
-                <span className="bg-[#30363d] text-[#e6edf3] rounded-full px-1.5 text-xs ml-0.5">
-                  {indicators.size}
-                </span>
-              </button>
+              <>
+                <button
+                  onClick={handleFetchHistory}
+                  disabled={fetchingHist || pollRef.current !== null}
+                  title="Re-fetch the full dividend-adjusted price history from source and refresh the chart"
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
+                    disabled:opacity-50 disabled:cursor-not-allowed
+                    ${fetchingHist || pollRef.current
+                      ? 'bg-cyan-950 border-cyan-700 text-cyan-300 animate-pulse'
+                      : 'bg-[#21262d] border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}>
+                  <span>↻</span> {fetchingHist || pollRef.current ? 'Updating…' : 'Adjust prices'}
+                </button>
+                <button
+                  onClick={() => setShowPicker(p => !p)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
+                    ${showPicker
+                      ? 'bg-blue-950 border-[#58a6ff] text-[#58a6ff]'
+                      : 'bg-[#21262d] border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}>
+                  <span>⊕</span> Chỉ báo
+                  <span className="bg-[#30363d] text-[#e6edf3] rounded-full px-1.5 text-xs ml-0.5">
+                    {indicators.size}
+                  </span>
+                </button>
+              </>
             )}
             <button onClick={onClose}
               className="text-[#8b949e] hover:text-[#e6edf3] transition-colors w-7 h-7 flex items-center justify-center rounded-lg hover:bg-[#21262d]">
@@ -274,6 +465,15 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
             </button>
           </div>
         </div>
+
+        {buyMsg && (
+          <div className={`mb-3 text-xs px-3 py-2 rounded-lg border ${
+            buyMsg.startsWith('✓')
+              ? 'bg-emerald-950/50 border-emerald-700 text-emerald-300'
+              : 'bg-red-950/50 border-red-800 text-red-300'}`}>
+            {buyMsg}
+          </div>
+        )}
 
         {showPicker && (
           <IndicatorPanel
@@ -303,7 +503,10 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
         {/* Chart / Wyckoff panel switcher */}
         {activePanel === 'chart' ? (
           <>
-            <div className="text-xs text-[#8b949e] mb-1">{quotes.length} trading days</div>
+            <div className="text-xs text-[#8b949e] mb-1 flex items-center gap-2">
+              <span>{quotes.length} trading days</span>
+              {fetchMsg && <span className="text-cyan-300 animate-pulse">· {fetchMsg}</span>}
+            </div>
             {loading ? (
               <div className="h-48 flex items-center justify-center text-[#8b949e] text-xs animate-pulse">Loading…</div>
             ) : quotes.length < 5 ? (
@@ -327,12 +530,19 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
               </div>
             )}
           </>
-        ) : (
+        ) : activePanel === 'wyckoff' ? (
           <div className="mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
             <div className="text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3">
               Wyckoff Analysis
             </div>
             <WyckoffPanel symbol={symbol} />
+          </div>
+        ) : (
+          <div className="mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
+            <div className="text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3">
+              XGBoost Prediction · 5-day horizon
+            </div>
+            <XGBPanel symbol={symbol} />
           </div>
         )}
 

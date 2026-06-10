@@ -26,6 +26,10 @@ export function CrawlTab({ crawlStatus, isRunning, onRefresh }: Props) {
   const [symError,      setSymError]      = useState<string | null>(null)
   const [symToast,      setSymToast]      = useState<string | null>(null)
 
+  const [adjusting,    setAdjusting]    = useState(false)
+  const [adjustError,  setAdjustError]  = useState<string | null>(null)
+  const [adjustToast,  setAdjustToast]  = useState<string | null>(null)
+
   const toggleJob = (job: Job) =>
     setSelectedJobs(prev => prev.includes(job) ? prev.filter(j => j !== job) : [...prev, job])
 
@@ -62,6 +66,23 @@ export function CrawlTab({ crawlStatus, isRunning, onRefresh }: Props) {
       setSymError(e instanceof Error ? e.message : 'Request failed')
     } finally {
       setSymSubmitting(false)
+    }
+  }
+
+  const handleAdjustAll = async () => {
+    setAdjusting(true); setAdjustError(null)
+    try {
+      // jobs=['history'] re-pulls the full dividend-adjusted series (from 2000)
+      // for every HOSE/HNX/UPCOM symbol and overwrites the stored prices.
+      const today = new Date().toISOString().slice(0, 10)
+      await api.crawl(today, ['history'])
+      setAdjustToast('Re-adjusting all prices — full history re-fetch started (several minutes).')
+      setTimeout(() => setAdjustToast(null), 6000)
+      onRefresh()
+    } catch (e) {
+      setAdjustError(e instanceof Error ? e.message : 'Request failed')
+    } finally {
+      setAdjusting(false)
     }
   }
 
@@ -123,6 +144,40 @@ export function CrawlTab({ crawlStatus, isRunning, onRefresh }: Props) {
       {updateToast && (
         <div className="fixed bottom-6 right-6 bg-[#161b22] border border-[#58a6ff]/50 text-[#58a6ff] px-4 py-2.5 rounded-xl shadow-xl text-sm font-medium z-50">
           ↑ {updateToast}
+        </div>
+      )}
+
+      {/* ── Adjust All Prices ──────────────────────────────────────────────── */}
+      <div className="bg-[#161b22] rounded-xl p-5 border border-[#30363d]">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="font-bold text-[#e6edf3] text-sm">Adjust All Prices</h2>
+            <p className="text-xs text-[#8b949e] mt-0.5 max-w-xl">
+              Re-fetch the full <span className="text-amber-300 font-semibold">dividend-adjusted</span> price
+              history for <span className="text-emerald-400 font-semibold">every</span> HOSE / HNX / UPCOM
+              symbol and overwrite stored prices. Use after dividends or splits shift the adjusted series.
+            </p>
+            <p className="text-xs text-[#8b949e]/50 mt-1">~1,500 symbols · re-pulls from 2000 · takes several minutes.</p>
+          </div>
+          <button
+            onClick={handleAdjustAll}
+            disabled={isRunning || adjusting}
+            className="px-5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-[#0d1117] font-bold
+                       text-sm transition-all hover:scale-105 active:scale-95
+                       disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 whitespace-nowrap">
+            {adjusting ? 'Starting…' : isRunning ? 'Crawl Running…' : '↻ Adjust All Prices'}
+          </button>
+        </div>
+        {adjustError && (
+          <div className="mt-3 bg-red-950 border border-red-800 rounded-lg px-3 py-2 text-red-400 text-xs">
+            {adjustError}
+          </div>
+        )}
+      </div>
+
+      {adjustToast && (
+        <div className="fixed bottom-6 right-6 bg-amber-950 border border-amber-700 text-amber-300 px-4 py-2.5 rounded-xl shadow-xl text-sm font-medium z-50">
+          ↻ {adjustToast}
         </div>
       )}
 

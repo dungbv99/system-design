@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { SymbolRow, SymbolsPage, WyckoffSignal, Prediction } from '../types'
-import { api, VN_INDICES } from '../api'
+import { api, VN_SECTORS } from '../api'
 import { fmtPrice, fmtVol } from '../utils'
 import { ExchangeBadge, Sparkline, ChangePct } from '../components/ui'
 import { SymbolModal } from '../components/SymbolModal'
@@ -66,20 +66,20 @@ function WyckoffCell({ w }: { w: WyckoffSignal | undefined }) {
   )
 }
 
-type IndexKey = keyof typeof VN_INDICES
-type SortKey  = 'symbol' | 'close' | 'change_pct' | 'volume' | 'xgb_score'
+type SectorKey = keyof typeof VN_SECTORS
+type SortKey   = 'symbol' | 'close' | 'change_pct' | 'volume' | 'xgb_score'
 
-export function VnBoardTab() {
-  const [activeIndex,   setActiveIndex]   = useState<IndexKey>('vn30')
-  const [data,          setData]          = useState<SymbolsPage | null>(null)
-  const [loading,       setLoading]       = useState(false)
-  const [detail,        setDetail]        = useState<SymbolRow | null>(null)
-  const [sortKey,       setSortKey]       = useState<SortKey>('change_pct')
-  const [sortAsc,       setSortAsc]       = useState(false)
-  const [wyckoffMap,    setWyckoffMap]    = useState<Map<string, WyckoffSignal>>(new Map())
-  const [predMap,       setPredMap]       = useState<Map<string, Prediction>>(new Map())
-  const [liveSymbols,   setLiveSymbols]   = useState<Record<string, string[]>>({})
-  const [refreshing,    setRefreshing]    = useState(false)
+export function IndustryTab() {
+  const [activeSector, setActiveSector] = useState<SectorKey>('vnfin')
+  const [data,         setData]         = useState<SymbolsPage | null>(null)
+  const [loading,      setLoading]      = useState(false)
+  const [detail,       setDetail]       = useState<SymbolRow | null>(null)
+  const [sortKey,      setSortKey]      = useState<SortKey>('change_pct')
+  const [sortAsc,      setSortAsc]      = useState(false)
+  const [wyckoffMap,   setWyckoffMap]   = useState<Map<string, WyckoffSignal>>(new Map())
+  const [predMap,      setPredMap]      = useState<Map<string, Prediction>>(new Map())
+  const [liveSymbols,  setLiveSymbols]  = useState<Record<string, string[]>>({})
+  const [refreshing,   setRefreshing]   = useState(false)
 
   useEffect(() => {
     api.wyckoffSignals('', '', 2000).then(d => {
@@ -90,7 +90,7 @@ export function VnBoardTab() {
     }).catch(() => {})
   }, [])
 
-  const idx = VN_INDICES[activeIndex]
+  const sec = VN_SECTORS[activeSector]
 
   const refreshCompositions = useCallback(() => {
     setRefreshing(true)
@@ -100,22 +100,17 @@ export function VnBoardTab() {
       .finally(() => setRefreshing(false))
   }, [])
 
-  const load = useCallback((key: IndexKey) => {
-    const ix = VN_INDICES[key]
+  const load = useCallback((key: SectorKey) => {
+    const s    = VN_SECTORS[key]
+    const syms = liveSymbols[key] ?? s.symbols
     setLoading(true)
-    const live = liveSymbols[key]
-    const req = 'symbols' in ix
-      ? api.symbols('', (live ?? ix.symbols).length, 0, '', (live ?? ix.symbols).join(','))
-      : api.symbols('', ix.approxCount + 200, 0, ix.exchange, '')
-    req.then(d => { setData(d); setLoading(false) })
+    api.symbols('', syms.length, 0, '', syms.join(','))
+      .then(d => { setData(d); setLoading(false) })
   }, [liveSymbols])
 
-  useEffect(() => { load(activeIndex) }, [load, activeIndex])
+  useEffect(() => { load(activeSector) }, [load, activeSector])
 
-  const handleIndex = (key: IndexKey) => {
-    setActiveIndex(key)
-    setData(null)
-  }
+  const handleSector = (key: SectorKey) => { setActiveSector(key); setData(null) }
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortAsc(a => !a)
@@ -159,53 +154,51 @@ export function VnBoardTab() {
   return (
     <div className="space-y-4">
 
-      {/* ── Index group selector ───────────────────────────────────────────── */}
+      {/* ── Sector grid ─────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between gap-2 mb-1">
-        <span className="text-xs text-[#8b949e]">Select an index to view its constituents</span>
+        <span className="text-xs text-[#8b949e]">Select a sector to view its stocks</span>
         <button
           onClick={refreshCompositions}
           disabled={refreshing}
-          title="Fetch latest index compositions from SSI"
+          title="Fetch latest sector compositions from SSI"
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all
             ${refreshing
               ? 'border-[#30363d] text-[#8b949e] cursor-not-allowed'
               : 'border-[#58a6ff]/40 text-[#58a6ff] hover:bg-[#58a6ff]/10 hover:border-[#58a6ff]'
             }`}
         >
-          <span style={{ display: 'inline-block', transform: refreshing ? 'rotate(360deg)' : 'none', transition: 'transform 1s linear' }}>↺</span>
+          <span>↺</span>
           {refreshing ? 'Fetching…' : 'Refresh Symbols'}
         </button>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        {(Object.keys(VN_INDICES) as IndexKey[]).map(key => {
-          const ix     = VN_INDICES[key]
-          const active = key === activeIndex
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        {(Object.keys(VN_SECTORS) as SectorKey[]).map(key => {
+          const s     = VN_SECTORS[key]
+          const active = key === activeSector
           const live   = liveSymbols[key]
-          const count  = live ? live.length : ('symbols' in ix ? ix.symbols.length : ix.approxCount)
-
-          // Count up/down for active index
-          const upCount   = active ? advances : null
-          const downCount = active ? declines : null
-
+          const count  = live ? live.length : s.symbols.length
           return (
             <button
               key={key}
-              onClick={() => handleIndex(key)}
+              onClick={() => handleSector(key)}
               className={`rounded-xl p-4 text-left border-2 transition-all hover:scale-[1.01] ${
                 active
                   ? 'shadow-lg scale-[1.02] border-current'
                   : 'border-[#30363d] hover:border-[#8b949e]/50 bg-[#161b22]/50'
               }`}
-              style={active ? { borderColor: ix.color, background: `${ix.color}14` } : {}}
+              style={active ? { borderColor: s.color, background: `${s.color}14` } : {}}
             >
-              <div className="font-bold text-sm" style={active ? { color: ix.color } : { color: '#8b949e' }}>
-                {ix.label}
+              <div className="font-bold text-sm" style={active ? { color: s.color } : { color: '#8b949e' }}>
+                {s.label}
               </div>
-              <div className="text-xs text-[#8b949e] mt-0.5">{count}+ stocks{live ? ' ✓' : ''}</div>
-              {active && upCount !== null && (
+              <div className="text-xs mt-0.5" style={{ color: active ? `${s.color}99` : '#6e7681' }}>
+                {s.labelVi}
+              </div>
+              <div className="text-xs text-[#8b949e] mt-0.5">{count} stocks{live ? ' ✓' : ''}</div>
+              {active && data && (
                 <div className="flex gap-2 mt-1.5 text-xs">
-                  <span className="text-emerald-400">▲ {upCount}</span>
-                  <span className="text-red-400">▼ {downCount}</span>
+                  <span className="text-emerald-400">▲ {advances}</span>
+                  <span className="text-red-400">▼ {declines}</span>
                 </div>
               )}
             </button>
@@ -216,7 +209,8 @@ export function VnBoardTab() {
       {/* ── Market breadth bar ─────────────────────────────────────────────── */}
       {data && !loading && (
         <div className="bg-[#161b22] border border-[#30363d] rounded-lg px-4 py-3 flex items-center gap-6 flex-wrap">
-          <span className="text-xs font-bold text-[#e6edf3]">{idx.label}</span>
+          <span className="text-xs font-bold text-[#e6edf3]">{sec.label}</span>
+          <span className="text-xs text-[#8b949e]">{sec.labelVi}</span>
           <div className="flex items-center gap-1.5">
             <div className="h-2 rounded-full bg-emerald-500"
                  style={{ width: `${Math.max(advances * 4, 4)}px` }} />
@@ -233,11 +227,14 @@ export function VnBoardTab() {
         </div>
       )}
 
-      {/* ── Stock grid ─────────────────────────────────────────────────────── */}
+      {/* ── Loading ─────────────────────────────────────────────────────────── */}
       {loading && (
-        <div className="text-center py-12 text-[#8b949e] text-sm animate-pulse">Loading {idx.label}…</div>
+        <div className="text-center py-12 text-[#8b949e] text-sm animate-pulse">
+          Loading {sec.label}…
+        </div>
       )}
 
+      {/* ── Stock table ─────────────────────────────────────────────────────── */}
       {!loading && data && (
         <div className="overflow-x-auto rounded-lg border border-[#30363d]">
           <table className="w-full text-xs">
@@ -250,8 +247,8 @@ export function VnBoardTab() {
                 <SortTh col="change_pct" label="Change"     right />
                 <th className="px-3 py-3 text-center font-semibold sticky top-0 z-10 bg-[#161b22]">Wyckoff</th>
                 <th
-                  className={`px-3 py-3 text-center font-semibold cursor-pointer select-none whitespace-nowrap
-                              hover:text-[#e6edf3] transition-colors sticky top-0 z-10 bg-[#161b22] text-purple-400`}
+                  className="px-3 py-3 text-center font-semibold cursor-pointer select-none whitespace-nowrap
+                             hover:text-[#e6edf3] transition-colors sticky top-0 z-10 bg-[#161b22] text-purple-400"
                   onClick={() => {
                     if (sortKey === 'xgb_score') setSortAsc(a => !a)
                     else { setSortKey('xgb_score'); setSortAsc(false) }
@@ -274,7 +271,7 @@ export function VnBoardTab() {
                   </td>
                 </tr>
               )}
-              {sorted.map((row, idx2) => {
+              {sorted.map((row, i) => {
                 const chgPct = row.change_pct ?? 0
                 const hasPct = row.change_pct != null
                 const borderColor = !hasPct ? '#30363d'
@@ -286,7 +283,7 @@ export function VnBoardTab() {
                     key={row.symbol}
                     className={`border-t border-[#30363d]/50 cursor-pointer transition-all
                       hover:bg-[#21262d] hover:ring-1 hover:ring-inset hover:ring-[#58a6ff]/20
-                      ${idx2 % 2 === 0 ? '' : 'bg-[#161b22]/30'}`}
+                      ${i % 2 === 0 ? '' : 'bg-[#161b22]/30'}`}
                     style={{ borderLeft: `4px solid ${borderColor}` }}
                     onClick={() => setDetail(row)}
                   >
@@ -341,7 +338,7 @@ export function VnBoardTab() {
       )}
 
       <p className="text-xs text-[#8b949e]/40 text-right">
-        Index constituents are approximate — HOSE rebalances quarterly.
+        HOSE GICS sectors · sourced from SSI iboard indexGroups
       </p>
 
       {detail && (

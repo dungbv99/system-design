@@ -23,8 +23,8 @@ services:
       DB_DSN: postgresql://postgres:postgres@postgres:5432/stock
       CRAWL_HOUR: "8"        # UTC hour — 08:00 UTC = 15:00 ICT (30 min after close)
       CRAWL_MINUTE: "0"
-      RATE_LIMIT_MS: "200"   # delay between per-symbol API calls
-      WORKERS: "10"          # concurrent symbol fetches
+      RATE_LIMIT_MS: "100"   # delay between per-symbol API calls
+      WORKERS: "5"           # concurrent symbol fetches
       RUN_NOW: "0"           # set to "1" to trigger an immediate crawl on startup
       API_PORT: "8090"
     depends_on:

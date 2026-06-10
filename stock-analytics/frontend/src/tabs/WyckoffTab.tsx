@@ -169,11 +169,11 @@ export function WyckoffTab() {
   const handleCompute = async () => {
     setComputing(true)
     try {
-      await api.computeWyckoff('HOSE,HNX')
+      await api.computeWyckoff('all')   // every symbol that has quote data
       setTimeout(() => {
         load(sigFilter, phaseFilter)
         setComputing(false)
-      }, 8000)
+      }, 12000)
     } catch {
       setComputing(false)
     }
@@ -214,7 +214,7 @@ export function WyckoffTab() {
               ? 'bg-cyan-950 border-cyan-700 text-cyan-300 animate-pulse cursor-not-allowed'
               : 'bg-[#21262d] border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}
         >
-          {computing ? '⏳ Analysing…' : '⟳ Refresh Analysis'}
+          {computing ? '⏳ Analysing all symbols…' : '⟳ Recalculate All'}
         </button>
       </div>
 
@@ -382,7 +382,7 @@ export function WyckoffTab() {
       )}
 
       <p className="text-xs text-[#8b949e]/40 text-right">
-        Wyckoff signals — HOSE + HNX · updated daily after market close · not financial advice
+        Wyckoff signals — all symbols with quote data · updated daily after market close · not financial advice
       </p>
 
       {detail && (

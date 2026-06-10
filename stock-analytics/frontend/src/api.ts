@@ -1,57 +1,199 @@
-import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, Prediction, PredictionPage } from './types'
+import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, MultifactorSignal, MultifactorPage, Prediction, PredictionPage, PortfolioPage } from './types'
 
-// ── VN Index constituents (HOSE, approximate – rebalanced quarterly) ──────────
+// ── VN Index constituents (approximate – HOSE rebalances quarterly) ──────────
+// symbols  → small/fixed indices: load by exact symbol list
+// exchange → large indices: load all stocks on those exchanges (comma-separated)
 
-export const VN_INDICES: Record<string, { label: string; color: string; symbols: string[] }> = {
+export type IndexDef =
+  | { label: string; color: string; symbols: string[] }
+  | { label: string; color: string; exchange: string; approxCount: number }
+
+export const VN_INDICES: Record<string, IndexDef> = {
   vn30: {
     label: 'VN30',
     color: '#3b82f6',
     symbols: [
-      'ACB','BCM','BID','BVH','CTG','FPT','GAS','GVR','HDB','HPG',
-      'MBB','MSN','MWG','PLX','POW','SAB','SHB','SSB','SSI','STB',
-      'TCB','TPB','VCB','VHM','VIB','VIC','VJC','VNM','VPB','VRE',
+      'ACB','BID','BSR','CTG','FPT','GAS','GVR','HDB','HPG','LPB',
+      'MBB','MSN','MWG','PLX','SAB','SHB','SSB','SSI','STB','TCB',
+      'TPB','VCB','VHM','VIB','VIC','VJC','VNM','VPB','VPL','VRE',
     ],
   },
-  vnmidcap: {
-    label: 'VN MidCap',
+  vn100: {
+    label: 'VN100',
     color: '#8b5cf6',
     symbols: [
-      'APH','ASM','BCG','BSR','BTP','CAV','CMG','CNG','CRE','CTD',
-      'DBC','DCM','DGW','DHC','DIG','DPM','EIB','EVF','GEE','GEX',
-      'GMD','HAH','HAR','HCM','HHS','HSG','HTN','IDC','IMP','KBC',
-      'KDH','KHG','LDG','LHG','MSB','NLG','NTC','NVL','PDR','PHR',
-      'PNJ','PPC','PTB','QNS','REE','SBT','SBV','SJS','SZC','TBC',
-      'TLG','TNG','VCI','VGC','VIX','VMC','VND','VPH','VRC','VTP',
-      'AGG','ALT','CII','DRC','HAG','HVN','KDC','LCG','PVD','VHC',
+      // VN30
+      'ACB','BID','BSR','CTG','FPT','GAS','GVR','HDB','HPG','LPB',
+      'MBB','MSN','MWG','PLX','SAB','SHB','SSB','SSI','STB','TCB',
+      'TPB','VCB','VHM','VIB','VIC','VJC','VNM','VPB','VPL','VRE',
+      // VN MidCap (VN100 = VN30 + VNMID)
+      'ANV','BAF','BCM','BMP','BSI','BVH','BWE','CII','CMG','CTD',
+      'CTR','CTS','DBC','DCM','DGW','DIG','DPM','DSE','DXG','DXS',
+      'EIB','EVF','FRT','FTS','GEE','GEX','GMD','HAG','HCM','HDC',
+      'HDG','HHV','HSG','HT1','IMP','KBC','KDC','KDH','KOS','MSB',
+      'NAB','NKG','NLG','NT2','NVL','OCB','PAN','PC1','PDR','PHR',
+      'PNJ','POW','PVD','PVT','REE','SBT','SCS','SIP','SJS','SZC',
+      'TCH','VCG','VCI','VGC','VHC','VIX','VND','VPI','VSC','VTP',
     ],
   },
-  vnsmallcap: {
+  vnmid: {
+    label: 'VN MidCap',
+    color: '#f97316',
+    symbols: [
+      'ANV','BAF','BCM','BMP','BSI','BVH','BWE','CII','CMG','CTD',
+      'CTR','CTS','DBC','DCM','DGW','DIG','DPM','DSE','DXG','DXS',
+      'EIB','EVF','FRT','FTS','GEE','GEX','GMD','HAG','HCM','HDC',
+      'HDG','HHV','HSG','HT1','IMP','KBC','KDC','KDH','KOS','MSB',
+      'NAB','NKG','NLG','NT2','NVL','OCB','PAN','PC1','PDR','PHR',
+      'PNJ','POW','PVD','PVT','REE','SBT','SCS','SIP','SJS','SZC',
+      'TCH','VCG','VCI','VGC','VHC','VIX','VND','VPI','VSC','VTP',
+    ],
+  },
+  vnsml: {
     label: 'VN SmallCap',
     color: '#f59e0b',
     symbols: [
-      'AGR','ACC','BFC','BRC','BSI','BVS','BWE','CCL','CEO','CSV',
-      'CTB','CTI','DVP','FTS','GMC','HAX','HBC','HDG','HUT','IJC',
-      'ITA','KSB','LCS','LIX','MCG','MCP','NBB','NHH','NTL','NTP',
-      'ORS','PC1','PGC','PGD','POT','PVP','PVT','QCG','RAL','SCR',
-      'SFC','SFG','SHI','SIP','SMC','SRC','SVC','TDG','TDH','TDP',
-      'TDW','TGG','THG','TIP','TIX','TPC','TRA','TRC','TSC','TTF',
-      'TVB','TVS','UDC','VBH','VCG','VGI','VHD','VIS','VNL','VOS',
-      'VSC','VSH','VST','VTO','WHS','BIC','CLC','CMC','CMP','CNT',
+      'AAA','AAM','ABT','ACC','ACL','ADG','ADP','ADS','AGG','AGR',
+      'APG','APH','ASM','ASP','AST','BCE','BFC','BIC','BKG','BMC',
+      'BMI','BRC','BTP','C32','CCC','CCL','CDC','CHP','CIG','CKG',
+      'CLL','CMX','CNG','CRC','CRE','CSM','CSV','CTF','CTI','D2D',
+      'DAH','DBD','DC4','DCL','DHA','DHC','DHM','DLG','DMC','DPG',
+      'DPR','DRC','DRL','DSC','DSN','DTA','DVP','DXV','ELC','EVE',
+      'EVG','FCM','FCN','FIR','FIT','FMC','GDT','GEG','GIL','GSP',
+      'HAH','HAP','HAR','HAX','HCD','HHP','HHS','HID','HII','HMC',
+      'HPX','HQC','HSL','HTG','HTI','HTN','HTV','HUB','HVH','ICT',
+      'IDI','IJC','ILB','ITC','ITD','JVC','KHG','KHP','KMR','KSB',
+      'LAF','LBM','LCG','LGL','LHG','LIX','LSS','MCM','MCP','MHC',
+      'MIG','MSH','NAF','NAV','NBB','NCT','NHA','NHH','NNC','NO1',
+      'NSC','NTL','OGC','ORS','PAC','PET','PGC','PHC','PIT','PLP',
+      'PPC','PTB','PTC','PTL','PVP','QCG','RAL','RYG','SAM','SAV',
+      'SBG','SCR','SFC','SFI','SGN','SGR','SGT','SHA','SHI','SJD',
+      'SKG','SMB','ST8','STK','SVD','SVT','SZL','TCI','TCL','TCM',
+      'TCO','TCT','TDC','TDG','TDH','TDP','TEG','THG','TIP','TLD',
+      'TLG','TLH','TMT','TN1','TNH','TNI','TNT','TRC','TSC','TTA',
+      'TTF','TV2','TVB','TVS','UIC','VCA','VDS','VFG','VIP','VNL',
+      'VOS','VPG','VPH','VPS','VRC','VSI','VTB','VTO','YBM','YEG',
     ],
   },
-  vndiamond: {
-    label: 'VN Diamond',
+  vnsi: {
+    label: 'VNSI',
+    color: '#ec4899',
+    symbols: [
+      'BCM','BID','BMP','BVH','CTD','CTG','DCM','GEX','HDB','IMP',
+      'MBB','MWG','PAN','PVD','SBT','TCB','VCB','VIC','VNM','VPB',
+    ],
+  },
+  vnx50: {
+    label: 'VNX50',
     color: '#06b6d4',
     symbols: [
-      'ACB','BMP','CMG','CTD','FPT','GMD','HCM','MWG','PAN',
-      'PHR','PNJ','REE','SBT','STB','TCB','VNM','VPB',
+      'ACB','BID','BSR','CTG','DCM','DPM','DXG','EIB','FPT','FRT',
+      'GEE','GEX','GMD','HCM','HDB','HPG','IDC','KBC','KDH','LPB',
+      'MBB','MSB','MSN','MWG','NLG','NVL','PDR','PLX','PNJ','POW',
+      'PVS','SHB','SHS','SSI','STB','TCB','TPB','VCB','VCG','VCI',
+      'VHM','VIB','VIC','VIX','VJC','VND','VNM','VPB','VPI','VRE',
     ],
+  },
+  vnxall: {
+    label: 'VNXAll',
+    color: '#10b981',
+    exchange: 'HOSE,HNX',
+    approxCount: 700,
+  },
+  vnall: {
+    label: 'VNAll',
+    color: '#84cc16',
+    exchange: 'HOSE,HNX,UPCOM',
+    approxCount: 1532,
+  },
+}
+
+// ── VN Industry sector constituents (HOSE GICS sectors, sourced from SSI indexGroups) ───
+export type SectorDef = { label: string; labelVi: string; color: string; symbols: string[] }
+
+export const VN_SECTORS: Record<string, SectorDef> = {
+  vnfin: {
+    label: 'Financials', labelVi: 'Tài chính', color: '#3b82f6',
+    symbols: [
+      'ACB','AGR','APG','BIC','BID','BMI','BSI','BVH','CTG','CTS',
+      'DSC','DSE','EIB','EVF','FIT','FTS','HCM','HDB','LPB','MBB',
+      'MIG','MSB','NAB','OCB','OGC','ORS','SHB','SSB','SSI','STB',
+      'TCB','TCI','TPB','TVB','TVS','VCB','VCI','VDS','VIB','VIX',
+      'VND','VPB',
+    ],
+  },
+  vnreal: {
+    label: 'Real Estate', labelVi: 'Bất động sản', color: '#f97316',
+    symbols: [
+      'AGG','ASM','BCM','CCL','CIG','CKG','CRE','D2D','DTA','DXG',
+      'DXS','FIR','HAR','HDC','HPX','HQC','ITC','KBC','KDH','KHG',
+      'KOS','LHG','NBB','NLG','NTL','NVL','PDR','PTL','QCG','SCR',
+      'SGR','SIP','SJS','SZL','TDC','TDH','TEG','TN1','VHM','VIC',
+      'VPH','VPI','VRE',
+    ],
+  },
+  vnind: {
+    label: 'Industrials', labelVi: 'Công nghiệp', color: '#8b5cf6',
+    symbols: [
+      'BCE','BKG','BMP','BRC','C32','CCC','CDC','CII','CLL','CTD',
+      'CTR','DC4','DIG','DLG','DPG','DVP','EVG','FCN','GEE','GEX',
+      'GMD','HAH','HCD','HDG','HHV','HID','HTI','HTN','HTV','HUB',
+      'HVH','IJC','ILB','ITD','LCG','LGL','MHC','NCT','NHA','NO1',
+      'PC1','PET','PHC','PIT','PTC','RAL','REE','RYG','SAM','SBG',
+      'SCS','SFI','SGN','SHA','SHI','SKG','ST8','SZC','TCH','TCL',
+      'TCO','TIP','TLG','TNI','TSC','TV2','VCG','VGC','VIP','VJC',
+      'VNL','VOS','VPG','VRC','VSC','VSI','VTO','VTP',
+    ],
+  },
+  vnmat: {
+    label: 'Materials', labelVi: 'Vật liệu', color: '#f59e0b',
+    symbols: [
+      'AAA','ACC','ADP','APH','BFC','BMC','CRC','CSV','CTI','DCM',
+      'DHA','DHC','DHM','DPM','DPR','DXV','FCM','GVR','HAP','HHP',
+      'HII','HMC','HPG','HSG','HT1','KSB','LBM','MCP','NAV','NHH',
+      'NKG','NNC','PHR','PLP','TDP','THG','TLD','TLH','TNT','TRC',
+      'VCA','VFG','VPS','YBM',
+    ],
+  },
+  vncond: {
+    label: 'Consumer Discret.', labelVi: 'Tiêu dùng tùy ý', color: '#ec4899',
+    symbols: [
+      'ADS','AST','CSM','CTF','DAH','DRC','DSN','EVE','FRT','GDT',
+      'GIL','HAX','HHS','HTG','KMR','MSH','MWG','PAC','PNJ','PTB',
+      'SAV','SFC','STK','SVD','SVT','TCM','TCT','TMT','TTF','VPL','VTB',
+    ],
+  },
+  vncons: {
+    label: 'Consumer Staples', labelVi: 'Tiêu dùng thiết yếu', color: '#10b981',
+    symbols: [
+      'AAM','ABT','ACL','ANV','BAF','CMX','DBC','FMC','HAG','HSL',
+      'IDI','KDC','LAF','LIX','LSS','MCM','MSN','NAF','NSC','PAN',
+      'SAB','SBT','SMB','VHC','VNM',
+    ],
+  },
+  vnene: {
+    label: 'Energy', labelVi: 'Năng lượng', color: '#f97316',
+    symbols: ['ASP','BSR','CNG','GSP','PGC','PLX','PVD','PVP','PVT','TDG'],
+  },
+  vnheal: {
+    label: 'Healthcare', labelVi: 'Y tế - Dược', color: '#06b6d4',
+    symbols: ['DBD','DCL','DMC','IMP','JVC','TNH'],
+  },
+  vnit: {
+    label: 'Technology', labelVi: 'Công nghệ', color: '#84cc16',
+    symbols: ['CMG','DGW','ELC','FPT','ICT'],
+  },
+  vnuti: {
+    label: 'Utilities', labelVi: 'Tiện ích', color: '#14b8a6',
+    symbols: ['BTP','BWE','CHP','DRL','GAS','GEG','KHP','NT2','POW','PPC','SJD','TTA','UIC'],
   },
 }
 
 // ── API client ────────────────────────────────────────────────────────────────
 
 export const api = {
+  compositions: (): Promise<Record<string, string[]>> =>
+    fetch('/api/index-compositions').then(r => r.json()),
   stats:   (): Promise<Stats>        => fetch('/api/stats').then(r => r.json()),
   status:  (): Promise<CrawlStatus>  => fetch('/api/crawl/status').then(r => r.json()),
   runs:    (limit = 40): Promise<CrawlRun[]> =>
@@ -85,8 +227,16 @@ export const api = {
       .then(r => r.json()),
   wyckoffSignal: (symbol: string): Promise<WyckoffSignal> =>
     fetch(`/api/symbols/${encodeURIComponent(symbol)}/wyckoff`).then(r => r.json()),
-  computeWyckoff: (exchanges = 'HOSE,HNX'): Promise<{ message: string; exchanges: string[] }> =>
+  computeWyckoff: (exchanges = 'all'): Promise<{ message: string; exchanges: string[] | string }> =>
     fetch(`/api/wyckoff/compute?exchanges=${encodeURIComponent(exchanges)}`, { method: 'POST' })
+      .then(r => r.json()),
+  multifactorSignals: (signal = '', minScore = 0, confidence = '', limit = 2000, offset = 0): Promise<MultifactorPage> =>
+    fetch(`/api/multifactor/signals?signal=${signal}&min_score=${minScore}&confidence=${confidence}&limit=${limit}&offset=${offset}`)
+      .then(r => r.json()),
+  multifactorSignal: (symbol: string): Promise<MultifactorSignal> =>
+    fetch(`/api/symbols/${encodeURIComponent(symbol)}/multifactor`).then(r => r.json()),
+  computeMultifactor: (exchanges = 'all'): Promise<{ message: string; exchanges: string[] | string }> =>
+    fetch(`/api/multifactor/compute?exchanges=${encodeURIComponent(exchanges)}`, { method: 'POST' })
       .then(r => r.json()),
   predictions: (signal = '', horizon = 5, limit = 2000, offset = 0): Promise<PredictionPage> =>
     fetch(`/api/predictions?signal=${signal}&horizon=${horizon}&limit=${limit}&offset=${offset}`)
@@ -96,6 +246,45 @@ export const api = {
   computePredictions: (exchanges = 'HOSE,HNX'): Promise<{ message: string; exchanges: string[] }> =>
     fetch(`/api/predictions/compute?exchanges=${encodeURIComponent(exchanges)}`, { method: 'POST' })
       .then(r => r.json()),
+  backtest: (
+    symbol: string,
+    strategy = 'both',
+    horizon = 20,
+    maxHold = 60,
+  ): Promise<import('./types').BacktestResponse> =>
+    fetch(`/api/backtest/${encodeURIComponent(symbol)}?strategy=${strategy}&horizon=${horizon}&max_hold=${maxHold}`)
+      .then(async r => {
+        if (!r.ok) {
+          const b = await r.json().catch(() => ({}))
+          throw new Error((b as { detail?: string }).detail ?? r.statusText)
+        }
+        return r.json()
+      }),
+  // ── Paper trades (assumed buys) ──────────────────────────────────────────
+  portfolio: (status = ''): Promise<PortfolioPage> =>
+    fetch(`/api/portfolio?status=${status}`).then(r => r.json()),
+  buyStock: (symbol: string, quantity = 1000, note = ''): Promise<{ id: number; symbol: string; buy_price: number; quantity: number }> =>
+    fetch('/api/portfolio', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ symbol, quantity, note }),
+    }).then(async r => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error((b as { detail?: string }).detail ?? r.statusText)
+      }
+      return r.json()
+    }),
+  closeTrade: (id: number): Promise<{ id: number; close_price: number }> =>
+    fetch(`/api/portfolio/${id}/close`, { method: 'POST' }).then(async r => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error((b as { detail?: string }).detail ?? r.statusText)
+      }
+      return r.json()
+    }),
+  deleteTrade: (id: number): Promise<{ id: number; deleted: boolean }> =>
+    fetch(`/api/portfolio/${id}`, { method: 'DELETE' }).then(r => r.json()),
   crawl:   (date: string, jobs: string[]): Promise<{ message: string }> =>
     fetch('/api/crawl', {
       method:  'POST',

@@ -527,6 +527,241 @@ class Store:
             rows = cur.fetchall()
         return {"total": total, "items": [dict(r) for r in rows]}
 
+    # ── Multi-factor signals ──────────────────────────────────────────────────
+
+    def upsert_multifactor_signal(self, analysis) -> None:
+        sql = """
+            INSERT INTO multifactor_signals
+                (symbol, analyzed_at, total_score, signal, confidence, factors_agreed,
+                 trend_score, momentum_score, volume_score, position_score,
+                 trend_reason, momentum_reason, volume_reason, position_reason,
+                 current_price, support, resistance, entry_price, stop_loss,
+                 description, bars_analyzed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (symbol) DO UPDATE SET
+                analyzed_at     = EXCLUDED.analyzed_at,
+                total_score     = EXCLUDED.total_score,
+                signal          = EXCLUDED.signal,
+                confidence      = EXCLUDED.confidence,
+                factors_agreed  = EXCLUDED.factors_agreed,
+                trend_score     = EXCLUDED.trend_score,
+                momentum_score  = EXCLUDED.momentum_score,
+                volume_score    = EXCLUDED.volume_score,
+                position_score  = EXCLUDED.position_score,
+                trend_reason    = EXCLUDED.trend_reason,
+                momentum_reason = EXCLUDED.momentum_reason,
+                volume_reason   = EXCLUDED.volume_reason,
+                position_reason = EXCLUDED.position_reason,
+                current_price   = EXCLUDED.current_price,
+                support         = EXCLUDED.support,
+                resistance      = EXCLUDED.resistance,
+                entry_price     = EXCLUDED.entry_price,
+                stop_loss       = EXCLUDED.stop_loss,
+                description     = EXCLUDED.description,
+                bars_analyzed   = EXCLUDED.bars_analyzed,
+                updated_at      = NOW()
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (
+                analysis.symbol, analysis.analyzed_at,
+                analysis.total_score, analysis.signal,
+                analysis.confidence, analysis.factors_agreed,
+                analysis.trend_score, analysis.momentum_score,
+                analysis.volume_score, analysis.position_score,
+                analysis.trend_reason, analysis.momentum_reason,
+                analysis.volume_reason, analysis.position_reason,
+                analysis.current_price, analysis.support, analysis.resistance,
+                analysis.entry_price, analysis.stop_loss,
+                analysis.description, analysis.bars_analyzed,
+            ))
+
+    def get_multifactor_signal(self, symbol: str) -> Optional[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM multifactor_signals WHERE symbol = %s",
+                (symbol.upper(),),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_multifactor_signals(
+        self,
+        signal: str = "",
+        min_score: int = 0,
+        confidence: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        conditions: list[str] = []
+        params: list = []
+        if signal:
+            conditions.append("m.signal = %s")
+            params.append(signal.upper())
+        if min_score:
+            conditions.append("m.total_score >= %s")
+            params.append(min_score)
+        if confidence:
+            conditions.append("m.confidence = %s")
+            params.append(confidence.upper())
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SELECT COUNT(*) FROM multifactor_signals m {where}", params)
+            total = cur.fetchone()["count"]
+            cur.execute(
+                f"""
+                SELECT m.*, s.name, s.exchange, s.industry
+                FROM multifactor_signals m
+                JOIN symbols s ON s.symbol = m.symbol
+                {where}
+                ORDER BY m.total_score DESC, m.updated_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                [*params, limit, offset],
+            )
+            rows = cur.fetchall()
+        return {"total": total, "items": [dict(r) for r in rows]}
+
+    # ── Paper trades (assumed buys) ───────────────────────────────────────────
+
+    def get_latest_close(self, symbol: str) -> Optional[float]:
+        """Most recent close price for a symbol, or None if no quotes."""
+        with self._read() as cur:
+            cur.execute(
+                "SELECT close FROM daily_quotes WHERE symbol = %s ORDER BY date DESC LIMIT 1",
+                (symbol,),
+            )
+            row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def add_paper_trade(
+        self,
+        symbol: str,
+        buy_price: float,
+        quantity: int = 1000,
+        buy_date: Optional[date] = None,
+        entry_price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        target: Optional[float] = None,
+        phase: Optional[str] = None,
+        signal: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> int:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO paper_trades
+                    (symbol, buy_date, buy_price, quantity,
+                     entry_price, stop_loss, target, phase, signal, note)
+                VALUES (%s, COALESCE(%s, CURRENT_DATE), %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (symbol, buy_date, buy_price, quantity,
+                 entry_price, stop_loss, target, phase, signal, note),
+            )
+            return cur.fetchone()[0]
+
+    def list_paper_trades(self, status: str = "") -> dict:
+        """List paper trades joined with the latest close + computed performance."""
+        where = ""
+        params: list = []
+        if status:
+            where = "WHERE p.status = %s"
+            params.append(status.upper())
+
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT p.*, s.name, s.exchange,
+                       lq.close AS current_price, lq.date AS price_date
+                FROM paper_trades p
+                JOIN symbols s ON s.symbol = p.symbol
+                LEFT JOIN LATERAL (
+                    SELECT close, date FROM daily_quotes q
+                    WHERE q.symbol = p.symbol ORDER BY date DESC LIMIT 1
+                ) lq ON TRUE
+                {where}
+                ORDER BY p.status, p.created_at DESC
+                """,
+                params,
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+        items = []
+        agg = {"cost": 0.0, "market_value": 0.0, "open_count": 0, "closed_count": 0}
+        for r in rows:
+            buy = float(r["buy_price"])
+            qty = int(r["quantity"])
+            closed = r["status"] == "CLOSED"
+            # Mark price: realised close for CLOSED, latest market close for OPEN.
+            mark = float(r["close_price"]) if closed and r["close_price"] is not None else (
+                float(r["current_price"]) if r["current_price"] is not None else None)
+            cost = buy * qty
+            mv   = (mark * qty) if mark is not None else cost
+            pl   = mv - cost
+            pl_pct = (pl / cost * 100) if cost else 0.0
+            items.append({
+                **r,
+                "buy_price":     buy,
+                "quantity":      qty,
+                "current_price": mark,
+                "cost":          round(cost, 2),
+                "market_value":  round(mv, 2),
+                "pl":            round(pl, 2),
+                "pl_pct":        round(pl_pct, 2),
+                "buy_date":      str(r["buy_date"]) if r["buy_date"] else None,
+                "close_date":    str(r["close_date"]) if r["close_date"] else None,
+                "price_date":    str(r["price_date"]) if r["price_date"] else None,
+                "created_at":    r["created_at"].isoformat() if r["created_at"] else None,
+            })
+            if closed:
+                agg["closed_count"] += 1
+            else:
+                agg["open_count"] += 1
+                agg["cost"] += cost
+                agg["market_value"] += mv
+
+        agg["pl"]     = round(agg["market_value"] - agg["cost"], 2)
+        agg["pl_pct"] = round((agg["pl"] / agg["cost"] * 100) if agg["cost"] else 0.0, 2)
+        agg["cost"]   = round(agg["cost"], 2)
+        agg["market_value"] = round(agg["market_value"], 2)
+        return {"items": items, "summary": agg}
+
+    def close_paper_trade(self, trade_id: int) -> Optional[float]:
+        """Close an OPEN trade at the symbol's latest close. Returns the mark
+        price, or None if the trade is missing/already closed/has no price."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT symbol FROM paper_trades WHERE id = %s AND status = 'OPEN'",
+                (trade_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            cur.execute(
+                "SELECT close FROM daily_quotes WHERE symbol = %s ORDER BY date DESC LIMIT 1",
+                (row[0],),
+            )
+            cr = cur.fetchone()
+            if not cr or cr[0] is None:
+                return None
+            mark = float(cr[0])
+            cur.execute(
+                """
+                UPDATE paper_trades
+                SET status = 'CLOSED', close_price = %s, close_date = CURRENT_DATE
+                WHERE id = %s
+                """,
+                (mark, trade_id),
+            )
+            return mark
+
+    def delete_paper_trade(self, trade_id: int) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM paper_trades WHERE id = %s", (trade_id,))
+            return cur.rowcount > 0
+
     def get_stats(self) -> dict:
         with self._read() as cur:
             cur.execute("SELECT COUNT(*) FROM symbols")
