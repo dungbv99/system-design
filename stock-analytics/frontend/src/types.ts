@@ -179,6 +179,83 @@ export interface PortfolioPage {
   summary: PortfolioSummary
 }
 
+// ── Portfolio backtest ──────────────────────────────────────────────────────
+
+export interface PortfolioBacktestSummary {
+  symbols:          number
+  start_date:       string
+  end_date:         string
+  years:            number
+  initial_capital:  number
+  final_equity:     number
+  total_return_pct: number
+  cagr_pct:         number
+  benchmark_pct:    number
+  total_signals:    number
+  executed_trades:  number
+  skipped_signals:  number
+  winning_trades:   number
+  losing_trades:    number
+  win_rate:         number
+  avg_return_pct:   number
+  avg_win_pct:      number
+  avg_loss_pct:     number
+  best_trade_pct:   number
+  worst_trade_pct:  number
+  profit_factor:    number | null
+  max_drawdown_pct: number
+  avg_holding_days: number
+  slots:            number
+  cost_pct:         number
+  min_hold:         number
+  lot_size:         number
+}
+
+export interface EquityPoint {
+  date:         string
+  equity:       number
+  drawdown_pct: number
+}
+
+export interface YearlyReturn {
+  year:       number
+  return_pct: number
+  equity:     number
+}
+
+export interface PortfolioTrade {
+  symbol:       string
+  signal:       string
+  event:        string | null
+  phase:        string
+  sub_phase:    string
+  entry_date:   string
+  entry_price:  number
+  stop_loss:    number
+  target:       number
+  exit_date:    string
+  exit_price:   number
+  exit_reason:  'stop' | 'target' | 'timeout' | 'end_of_data'
+  return_pct:   number
+  net_return_pct: number
+  holding_days: number
+  shares:       number
+  alloc:        number
+  pl:           number
+  exit_value:   number
+}
+
+export interface PortfolioBacktest {
+  id:           number
+  label:        string
+  created_at:   string
+  params:       { start_date: string; capital: number; slots: number; lookback: number; horizon: number; step: number }
+  summary:      PortfolioBacktestSummary
+  equity_curve: EquityPoint[]
+  yearly:       YearlyReturn[]
+  trades:       PortfolioTrade[]
+}
+
 export interface IndicatorDef {
   id:       string
   label:    string

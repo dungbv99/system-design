@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS wyckoff_signals (
     last_event      VARCHAR(20),             -- SC|Spring|SOS|LPS|BC|UT|LPSY …
     entry_price     NUMERIC(12,2),           -- optimal entry level
     stop_loss       NUMERIC(12,2),           -- stop-loss level
+    target          NUMERIC(12,2),           -- take-profit level (= resistance for BUY)
+    rr_ratio        NUMERIC(6,2),            -- reward/risk = (target-entry)/(entry-stop); BUY requires >= 1.5
     description     TEXT,
     bars_analyzed   INT          NOT NULL DEFAULT 0,
     updated_at      TIMESTAMP    NOT NULL DEFAULT NOW()
@@ -142,6 +144,21 @@ CREATE TABLE IF NOT EXISTS predictions (
     model_date    DATE         NOT NULL,   -- training-cutoff date for traceability
     PRIMARY KEY (symbol, predicted_at, horizon_days)
 );
+
+-- ── Portfolio backtest runs (Wyckoff over a basket, e.g. VN100) ───────────────
+
+CREATE TABLE IF NOT EXISTS portfolio_backtests (
+    id           BIGSERIAL   PRIMARY KEY,
+    label        VARCHAR(100) NOT NULL,          -- e.g. 'VN100 Wyckoff 2018+'
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    params       JSONB        NOT NULL,          -- start_date, capital, slots, …
+    summary      JSONB        NOT NULL,          -- headline metrics
+    equity_curve JSONB        NOT NULL,          -- [{date, equity, drawdown_pct}]
+    yearly       JSONB        NOT NULL,          -- [{year, return_pct, equity}]
+    trades       JSONB        NOT NULL           -- executed trades
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_backtests_created ON portfolio_backtests (created_at DESC);
 
 -- ── Paper trades (assumed buys, for performance review) ───────────────────────
 

@@ -8,6 +8,7 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
+from psycopg2.extras import Json
 
 from client import DailyQuote, Fundamental, NewsPost, Symbol
 
@@ -443,8 +444,8 @@ class Store:
             INSERT INTO wyckoff_signals
                 (symbol, analyzed_at, phase, sub_phase, signal, signal_strength,
                  support, resistance, current_price, last_event,
-                 entry_price, stop_loss, description, bars_analyzed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 entry_price, stop_loss, target, rr_ratio, description, bars_analyzed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (symbol) DO UPDATE SET
                 analyzed_at     = EXCLUDED.analyzed_at,
                 phase           = EXCLUDED.phase,
@@ -457,6 +458,8 @@ class Store:
                 last_event      = EXCLUDED.last_event,
                 entry_price     = EXCLUDED.entry_price,
                 stop_loss       = EXCLUDED.stop_loss,
+                target          = EXCLUDED.target,
+                rr_ratio        = EXCLUDED.rr_ratio,
                 description     = EXCLUDED.description,
                 bars_analyzed   = EXCLUDED.bars_analyzed,
                 updated_at      = NOW()
@@ -469,6 +472,7 @@ class Store:
                 analysis.support, analysis.resistance,
                 analysis.current_price, analysis.last_event,
                 analysis.entry_price, analysis.stop_loss,
+                analysis.target, analysis.rr_ratio,
                 analysis.description, analysis.bars_analyzed,
             ))
 
@@ -622,6 +626,37 @@ class Store:
             )
             rows = cur.fetchall()
         return {"total": total, "items": [dict(r) for r in rows]}
+
+    # ── Portfolio backtests ───────────────────────────────────────────────────
+
+    def save_portfolio_backtest(self, label: str, result: dict) -> int:
+        sql = """
+            INSERT INTO portfolio_backtests (label, params, summary, equity_curve, yearly, trades)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (
+                label,
+                Json(result.get("params", {})),
+                Json(result.get("summary", {})),
+                Json(result.get("equity_curve", [])),
+                Json(result.get("yearly", [])),
+                Json(result.get("trades", [])),
+            ))
+            return cur.fetchone()[0]
+
+    def get_latest_portfolio_backtest(self) -> Optional[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM portfolio_backtests ORDER BY created_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["created_at"] = d["created_at"].isoformat() if d["created_at"] else None
+        return d
 
     # ── Paper trades (assumed buys) ───────────────────────────────────────────
 

@@ -68,6 +68,17 @@ class CrawlRequest(BaseModel):
     years: int       = 0   # 0 = all time (from 2000-01-01); N = last N years
 
 
+class PortfolioBacktestRequest(BaseModel):
+    symbols:    list[str] = []          # empty → backend VN100 default
+    label:      str       = "VN100 Wyckoff 2018+"
+    start_date: date      = date(2018, 1, 1)
+    capital:    float     = 1_000_000_000.0
+    slots:      int       = 8
+    cost_pct:   float     = 0.3
+    min_hold:   int       = 3
+    lot_size:   int       = 100
+
+
 class BuyRequest(BaseModel):
     symbol:    str
     quantity:  int            = 1000
@@ -455,6 +466,41 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
             horizon=horizon, max_hold=max_hold, step=step,
         )
         return result
+
+    # ── Portfolio backtest (Wyckoff over a basket, e.g. VN100) ────────────────
+
+    @app.get("/api/portfolio-backtest")
+    def get_portfolio_backtest():
+        """Return the most recent stored portfolio backtest, or null if none."""
+        return store.get_latest_portfolio_backtest()
+
+    @app.post("/api/portfolio-backtest", status_code=202)
+    def run_portfolio_backtest(req: PortfolioBacktestRequest):
+        """Run a Wyckoff portfolio backtest over a basket (background job)."""
+        if not state.acquire(str(date.today()), ["portfolio_backtest"]):
+            raise HTTPException(409, "A crawl is already running")
+
+        syms = [s.strip().upper() for s in req.symbols if s.strip()] if req.symbols else None
+
+        def run():
+            try:
+                crawler.run_portfolio_backtest(
+                    symbols=syms,
+                    label=req.label,
+                    start_date=str(req.start_date),
+                    capital=req.capital,
+                    slots=req.slots,
+                    cost_pct=req.cost_pct,
+                    min_hold=req.min_hold,
+                    lot_size=req.lot_size,
+                )
+            except Exception as e:
+                log.error("portfolio backtest failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": "portfolio backtest started", "label": req.label}
 
     # ── XGBoost predictions ───────────────────────────────────────────────────
 

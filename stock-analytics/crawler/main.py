@@ -53,6 +53,23 @@ WORKERS      = int(os.environ.get("WORKERS", "5"))
 RUN_NOW      = os.environ.get("RUN_NOW", "0") == "1"
 API_PORT     = int(os.environ.get("API_PORT", "8090"))
 
+# VN100 constituents (VN30 + VN Midcap). HOSE rebalances quarterly; this is a
+# representative static list used for the portfolio backtest basket.
+VN100 = [
+    # VN30
+    "ACB", "BID", "BSR", "CTG", "FPT", "GAS", "GVR", "HDB", "HPG", "LPB",
+    "MBB", "MSN", "MWG", "PLX", "SAB", "SHB", "SSB", "SSI", "STB", "TCB",
+    "TPB", "VCB", "VHM", "VIB", "VIC", "VJC", "VNM", "VPB", "VPL", "VRE",
+    # VN Midcap
+    "ANV", "BAF", "BCM", "BMP", "BSI", "BVH", "BWE", "CII", "CMG", "CTD",
+    "CTR", "CTS", "DBC", "DCM", "DGW", "DIG", "DPM", "DSE", "DXG", "DXS",
+    "EIB", "EVF", "FRT", "FTS", "GEE", "GEX", "GMD", "HAG", "HCM", "HDC",
+    "HDG", "HHV", "HSG", "HT1", "IMP", "KBC", "KDC", "KDH", "KOS", "MSB",
+    "NAB", "NKG", "NLG", "NT2", "NVL", "OCB", "PAN", "PC1", "PDR", "PHR",
+    "PNJ", "POW", "PVD", "PVT", "REE", "SBT", "SCS", "SIP", "SJS", "SZC",
+    "TCH", "VCG", "VCI", "VGC", "VHC", "VIX", "VND", "VPI", "VSC", "VTP",
+]
+
 
 # ── Crawl jobs ────────────────────────────────────────────────────────────────
 
@@ -416,6 +433,53 @@ class Crawler:
                     log.info("multifactor [%d/%d] errors=%d", done, len(symbols), errors)
 
         log.info("multifactor done: %d symbols (%d errors)", done - errors, errors)
+
+    # ── Portfolio backtest (Wyckoff over a basket, e.g. VN100) ────────────────
+
+    def run_portfolio_backtest(
+        self,
+        symbols:    list[str] | None = None,
+        label:      str   = "VN100 Wyckoff 2018+",
+        start_date: str   = "2018-01-01",
+        capital:    float = 1_000_000_000.0,
+        slots:      int   = 8,
+        cost_pct:   float = 0.3,
+        min_hold:   int   = 3,
+        lot_size:   int   = 100,
+    ) -> int:
+        """Backtest the Wyckoff signal_replay strategy across `symbols` from
+        `start_date`, simulate one shared cash account, and persist the result.
+
+        Returns the stored backtest id.
+        """
+        import portfolio_backtest as pbt
+
+        syms = symbols or VN100
+        log.info("portfolio backtest '%s': %d symbols from %s", label, len(syms), start_date)
+
+        # Load bars for every symbol (parallel DB reads).
+        symbol_bars: dict[str, list[dict]] = {}
+
+        def load(sym: str) -> tuple[str, list[dict]]:
+            return sym, self.store.get_symbol_quotes(sym, days=9999)
+
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            for fut in as_completed([pool.submit(load, s) for s in syms]):
+                sym, bars = fut.result()
+                if bars:
+                    symbol_bars[sym] = bars
+
+        result = pbt.run_portfolio_backtest(
+            symbol_bars, start_date=start_date, capital=capital,
+            slots=slots, cost_pct=cost_pct, min_hold=min_hold, lot_size=lot_size,
+        )
+        bid = self.store.save_portfolio_backtest(label, result)
+        s = result["summary"]
+        log.info(
+            "portfolio backtest done #%d: %d trades, total %.1f%%, CAGR %.1f%%, maxDD %.1f%%",
+            bid, s["executed_trades"], s["total_return_pct"], s["cagr_pct"], s["max_drawdown_pct"],
+        )
+        return bid
 
     # ── Full daily run ────────────────────────────────────────────────────────
 

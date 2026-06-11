@@ -19,6 +19,15 @@ from typing import Optional
 import statistics
 
 
+# ── Risk management ───────────────────────────────────────────────────────────
+
+# Minimum reward/risk ratio required to take a BUY.
+#   reward = target − entry,  risk = entry − stop
+#   e.g. entry 10, target 13, stop 8 → (13−10)/(10−8) = 1.5  (accepted)
+# A BUY whose setup falls below this is downgraded to WAIT.
+MIN_RR_RATIO = 1.5
+
+
 # ── Public types ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -44,6 +53,8 @@ class WyckoffAnalysis:
     last_event: Optional[str]
     entry_price: Optional[float]
     stop_loss: Optional[float]
+    target: Optional[float]          # take-profit level used for the R:R gate
+    rr_ratio: Optional[float]        # reward/risk = (target−entry)/(entry−stop)
     events: list[WyckoffEvent] = field(default_factory=list)
     description: str = ""
     bars_analyzed: int = 0
@@ -114,6 +125,21 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 260) -> WyckoffAnalys
     entry_price, stop_loss = _compute_entry_stop(
         phase, sub_phase, events, support, resistance,
     )
+
+    # ── Reward/risk gate ──────────────────────────────────────────────────────
+    # For a BUY the take-profit is the range top (resistance). Only keep the BUY
+    # if (target−entry)/(entry−stop) ≥ MIN_RR_RATIO; otherwise downgrade to WAIT.
+    target   = resistance if signal == "BUY" else None
+    rr_ratio = _reward_risk(entry_price, stop_loss, target)
+    if signal == "BUY" and (rr_ratio is None or rr_ratio < MIN_RR_RATIO):
+        rr_txt = f"{rr_ratio:.2f}" if rr_ratio is not None else "n/a"
+        description = (
+            f"BUY skipped — reward/risk {rr_txt} < {MIN_RR_RATIO:.1f} "
+            f"(entry {_r(entry_price)}, stop {_r(stop_loss)}, target {_r(target)}). "
+            + description
+        )
+        signal, strength = "WAIT", "WEAK"
+
     vsa_labels = classify_vsa_bars(highs, lows, closes, volumes, avg_vol, avg_hl_spread)
 
     return WyckoffAnalysis(
@@ -129,6 +155,8 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 260) -> WyckoffAnalys
         last_event=events[-1].event_type if events else None,
         entry_price=_r(entry_price),
         stop_loss=_r(stop_loss),
+        target=_r(target),
+        rr_ratio=round(rr_ratio, 2) if rr_ratio is not None else None,
         events=events,
         description=description,
         bars_analyzed=n,
@@ -624,6 +652,25 @@ def _compute_entry_stop(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _reward_risk(
+    entry: Optional[float],
+    stop:  Optional[float],
+    target: Optional[float],
+) -> Optional[float]:
+    """Long reward/risk ratio = (target − entry) / (entry − stop).
+
+    Returns None when any level is missing or the geometry is invalid
+    (stop ≥ entry, or target ≤ entry → no measurable upside).
+    """
+    if not entry or not stop or not target:
+        return None
+    risk   = entry - stop
+    reward = target - entry
+    if risk <= 0 or reward <= 0:
+        return None
+    return reward / risk
+
+
 def _f(v) -> float:
     try:
         return float(v or 0)
@@ -701,6 +748,8 @@ def _empty(symbol: str, reason: str) -> WyckoffAnalysis:
         last_event=None,
         entry_price=None,
         stop_loss=None,
+        target=None,
+        rr_ratio=None,
         events=[],
         description=reason,
         bars_analyzed=0,

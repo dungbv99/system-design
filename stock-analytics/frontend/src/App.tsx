@@ -11,6 +11,7 @@ import { BuyNowTab }    from './tabs/BuyNowTab'
 import { StrongBuyTab } from './tabs/StrongBuyTab'
 import { PortfolioTab } from './tabs/PortfolioTab'
 import { BacktestTab }  from './tabs/BacktestTab'
+import { PortfolioBacktestTab } from './tabs/PortfolioBacktestTab'
 import { CrawlTab }     from './tabs/CrawlTab'
 import { HistoryTab }   from './tabs/HistoryTab'
 
@@ -20,7 +21,7 @@ export default function App() {
   const [stats,       setStats]       = useState<Stats | null>(null)
   const [crawlStatus, setCrawlStatus] = useState<CrawlStatus | null>(null)
   const [runs,        setRuns]        = useState<CrawlRun[]>([])
-  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'industry' | 'wyckoff' | 'multifactor' | 'buynow' | 'strongbuy' | 'portfolio' | 'backtest' | 'crawl' | 'history'>('market')
+  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'industry' | 'wyckoff' | 'multifactor' | 'buynow' | 'strongbuy' | 'portfolio' | 'backtest' | 'vn100bt' | 'crawl' | 'history'>('market')
   const [now,         setNow]         = useState(() => new Date())
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -58,6 +59,7 @@ export default function App() {
     { id: 'strongbuy', label: '🔥 Strong Buy' },
     { id: 'portfolio', label: '💼 Portfolio' },
     { id: 'backtest', label: '⏪ Backtest'  },
+    { id: 'vn100bt',  label: '📉 VN100 BT'  },
     { id: 'crawl',    label: isRunning ? '⏳ Crawl' : '▶ Crawl' },
     { id: 'history',  label: '📋 History'  },
   ] as const
@@ -149,6 +151,7 @@ export default function App() {
         {activeTab === 'strongbuy' && <StrongBuyTab />}
         {activeTab === 'portfolio' && <PortfolioTab />}
         {activeTab === 'backtest' && <BacktestTab />}
+        {activeTab === 'vn100bt'  && <PortfolioBacktestTab />}
         {activeTab === 'crawl'   && <CrawlTab crawlStatus={crawlStatus} isRunning={isRunning} onRefresh={refresh} />}
         {activeTab === 'history' && <HistoryTab runs={runs} />}
       </main>

@@ -78,6 +78,7 @@ def run_backtest(
     horizon:  int = 20,       # max holding bars for signal_replay
     max_hold: int = 60,       # max holding bars for event_trades
     step:     int = 5,        # walk-forward step (bars between analyze calls)
+    min_hold: int = 0,        # min holding bars before stop/target can fire (T+ rule)
 ) -> dict:
     """
     Run Wyckoff walk-forward backtest.
@@ -97,7 +98,7 @@ def run_backtest(
 
     sr_trades, et_trades = _walk_forward(
         symbol, bars, lookback=lookback,
-        horizon=horizon, max_hold=max_hold, step=step,
+        horizon=horizon, max_hold=max_hold, step=step, min_hold=min_hold,
     )
 
     out = {}
@@ -121,6 +122,7 @@ def _walk_forward(
     horizon:  int,
     max_hold: int,
     step:     int,
+    min_hold: int = 0,
 ) -> tuple[list[BacktestTrade], list[BacktestTrade]]:
     """
     Single walk-forward loop that drives both strategies, sharing
@@ -152,7 +154,7 @@ def _walk_forward(
             for j in range(last_check, check_end):
                 c   = _f(bars[j].get("close"))
                 hld = j - sr_pos["ei"]
-                done = _check_exit(sr_pos, c, hld, horizon, bars[j], sr_trades)
+                done = _check_exit(sr_pos, c, hld, horizon, bars[j], sr_trades, min_hold)
                 if done:
                     sr_in_pos = False
                     break
@@ -163,7 +165,7 @@ def _walk_forward(
             alive = []
             for pos in et_open:
                 hld  = j - pos["ei"]
-                done = _check_exit(pos, c, hld, max_hold, bars[j], et_trades)
+                done = _check_exit(pos, c, hld, max_hold, bars[j], et_trades, min_hold)
                 if not done:
                     alive.append(pos)
             et_open = alive
@@ -248,9 +250,17 @@ def _check_exit(
     max_hld: int,
     bar:    dict,
     sink:   list,
+    min_hold: int = 0,
 ) -> bool:
-    """Return True if the position was closed (trade appended to sink)."""
+    """Return True if the position was closed (trade appended to sink).
+
+    `min_hold` enforces a minimum holding period (in bars) before a stop or
+    target can fire — models Vietnam's T+ settlement, where bought shares
+    cannot be sold for the first few sessions.
+    """
     if close <= 0:
+        return False
+    if holding < min_hold:
         return False
     sig = pos["sig"]
     if sig == "BUY":

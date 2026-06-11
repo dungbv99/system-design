@@ -221,6 +221,19 @@ export const api = {
         }
         return r.json();
     }),
+    // ── Portfolio backtest (Wyckoff over a basket) ───────────────────────────
+    portfolioBacktest: () => fetch('/api/portfolio-backtest').then(r => r.json()),
+    runPortfolioBacktest: (symbols, label, startDate, capital, slots) => fetch('/api/portfolio-backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols, label, start_date: startDate, capital, slots }),
+    }).then(async (r) => {
+        if (!r.ok) {
+            const b = await r.json().catch(() => ({}));
+            throw new Error(b.detail ?? r.statusText);
+        }
+        return r.json();
+    }),
     // ── Paper trades (assumed buys) ──────────────────────────────────────────
     portfolio: (status = '') => fetch(`/api/portfolio?status=${status}`).then(r => r.json()),
     buyStock: (symbol, quantity = 1000, note = '') => fetch('/api/portfolio', {

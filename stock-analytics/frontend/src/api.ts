@@ -1,4 +1,4 @@
-import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, MultifactorSignal, MultifactorPage, Prediction, PredictionPage, PortfolioPage } from './types'
+import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, MultifactorSignal, MultifactorPage, Prediction, PredictionPage, PortfolioPage, PortfolioBacktest } from './types'
 
 // ── VN Index constituents (approximate – HOSE rebalances quarterly) ──────────
 // symbols  → small/fixed indices: load by exact symbol list
@@ -260,6 +260,23 @@ export const api = {
         }
         return r.json()
       }),
+  // ── Portfolio backtest (Wyckoff over a basket) ───────────────────────────
+  portfolioBacktest: (): Promise<PortfolioBacktest | null> =>
+    fetch('/api/portfolio-backtest').then(r => r.json()),
+  runPortfolioBacktest: (
+    symbols: string[], label: string, startDate: string, capital: number, slots: number,
+  ): Promise<{ message: string; label: string }> =>
+    fetch('/api/portfolio-backtest', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ symbols, label, start_date: startDate, capital, slots }),
+    }).then(async r => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error((b as { detail?: string }).detail ?? r.statusText)
+      }
+      return r.json()
+    }),
   // ── Paper trades (assumed buys) ──────────────────────────────────────────
   portfolio: (status = ''): Promise<PortfolioPage> =>
     fetch(`/api/portfolio?status=${status}`).then(r => r.json()),
