@@ -27,6 +27,18 @@ import statistics
 # A BUY whose setup falls below this is downgraded to WAIT.
 MIN_RR_RATIO = 1.5
 
+# Minimum average traded value (close × volume) over the last 20 sessions.
+# BUYs on illiquid stocks are blocked — 5 billion VND ≈ meaningful daily liquidity
+# on HOSE/HNX.  Adjust if targeting smaller exchanges.
+MIN_AVG_VALUE_VND = 5_000_000_000
+
+# An entry taken from a Wyckoff event close (LPS/Test/Spring) is only
+# actionable while price still trades near that event.  When price has
+# drifted further than this from the event close, the entry is re-anchored
+# to the current price so entry, gap and R:R describe a trade that can
+# actually be placed today.
+MAX_ENTRY_DRIFT = 0.10
+
 
 # ── Public types ──────────────────────────────────────────────────────────────
 
@@ -99,13 +111,18 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 260) -> WyckoffAnalys
     ma20  = _sma(closes, 20)
     ma50  = _sma(closes, 50)
     ma200 = _sma(closes, min(200, n))
-    rsi   = _rsi(closes, 14)
 
     current_price   = closes[-1]
     overall_uptrend = (ma50[-1] > ma200[-1]) if (ma50 and ma200) else True
 
-    rsi_cur  = rsi[-1]  if rsi  else 50.0
-    rsi_prev = rsi[-2]  if len(rsi) > 1 else rsi_cur
+    # Use all available bars (not just the lookback window) for higher-timeframe
+    # resampling so monthly/weekly indicators have enough history.
+    weekly_bars  = _resample(bars, "W")
+    monthly_bars = _resample(bars, "M")
+    monthly_confirm,       monthly_detail       = _check_monthly(monthly_bars)
+    weekly_confirm,        weekly_detail        = _check_weekly(weekly_bars)
+    monthly_short_confirm, monthly_short_detail = _check_monthly_short(monthly_bars)
+    weekly_short_confirm,  weekly_short_detail  = _check_weekly_short(weekly_bars)
 
     support, resistance = _detect_range(highs, lows, n)
     events = _detect_events(
@@ -120,25 +137,55 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 260) -> WyckoffAnalys
     signal, strength, description = _generate_signal(
         phase, sub_phase, events,
         current_price, support, resistance, ma20_cur,
-        rsi_cur, rsi_prev,
+        monthly_confirm,       monthly_detail,
+        weekly_confirm,        weekly_detail,
+        monthly_short_confirm, monthly_short_detail,
+        weekly_short_confirm,  weekly_short_detail,
     )
     entry_price, stop_loss = _compute_entry_stop(
         phase, sub_phase, events, support, resistance,
     )
 
+    # ── Stale-entry guard ─────────────────────────────────────────────────────
+    # The event close used as entry is only meaningful while price still trades
+    # near it (e.g. an LPS from months ago, 26% above today's price, is not an
+    # entry anyone can take).  Re-anchor drifted entries to the current price.
+    if (signal == "BUY" and entry_price and current_price > 0
+            and abs(current_price - entry_price) / entry_price > MAX_ENTRY_DRIFT):
+        entry_price = current_price
+
     # ── Reward/risk gate ──────────────────────────────────────────────────────
-    # For a BUY the take-profit is the range top (resistance). Only keep the BUY
-    # if (target−entry)/(entry−stop) ≥ MIN_RR_RATIO; otherwise downgrade to WAIT.
+    # For a BUY the take-profit is the range top (resistance) and the entry is
+    # the actionable price — the current price, not a historical event close.
+    # Only keep the BUY if (target−current)/(current−stop) ≥ MIN_RR_RATIO;
+    # otherwise downgrade to WAIT.
     target   = resistance if signal == "BUY" else None
-    rr_ratio = _reward_risk(entry_price, stop_loss, target)
+    rr_basis = current_price if signal == "BUY" and current_price > 0 else entry_price
+    rr_ratio = _reward_risk(rr_basis, stop_loss, target)
     if signal == "BUY" and (rr_ratio is None or rr_ratio < MIN_RR_RATIO):
         rr_txt = f"{rr_ratio:.2f}" if rr_ratio is not None else "n/a"
         description = (
             f"BUY skipped — reward/risk {rr_txt} < {MIN_RR_RATIO:.1f} "
-            f"(entry {_r(entry_price)}, stop {_r(stop_loss)}, target {_r(target)}). "
+            f"(buy {_r(rr_basis)}, stop {_r(stop_loss)}, target {_r(target)}). "
             + description
         )
         signal, strength = "WAIT", "WEAK"
+
+    # ── Liquidity gate ────────────────────────────────────────────────────────
+    # Require avg 20-session traded value (close × volume) ≥ 5B VND.
+    if signal == "BUY":
+        avg_value_20 = _mean(
+            closes[i] * volumes[i]
+            for i in range(max(0, n - 20), n)
+            if closes[i] > 0 and volumes[i] > 0
+        )
+        if avg_value_20 < MIN_AVG_VALUE_VND:
+            description = (
+                f"BUY skipped — avg 20-session value "
+                f"{avg_value_20 / 1e9:.2f}B VND < 5B (illiquid). "
+                + description
+            )
+            signal, strength = "WAIT", "WEAK"
 
     vsa_labels = classify_vsa_bars(highs, lows, closes, volumes, avg_vol, avg_hl_spread)
 
@@ -487,22 +534,58 @@ def _generate_signal(
     support: float,
     resistance: float,
     ma20: float,
-    rsi_cur: float = 50.0,
-    rsi_prev: float = 50.0,
+    monthly_confirm: bool = False,
+    monthly_detail: str = "",
+    weekly_confirm: bool = False,
+    weekly_detail: str = "",
+    monthly_short_confirm: bool = False,
+    monthly_short_detail: str = "",
+    weekly_short_confirm: bool = False,
+    weekly_short_detail: str = "",
 ) -> tuple[str, str, str]:
     """
     Map phase + sub-phase + events to (signal, strength, description).
 
-    RSI(14) filter applied to STRONG signals:
-      BUY  STRONG : requires RSI < 50 and rising  (rsi_cur > rsi_prev)
-      SHORT STRONG: requires RSI > 50 and falling (rsi_cur < rsi_prev)
-    If the RSI condition is not met the signal strength is downgraded to MODERATE.
+    Multi-timeframe confirmation for BUY/SHORT strength:
+      STRONG   = monthly AND weekly both confirm
+      MODERATE = either monthly or weekly confirms
+      WEAK     = neither (signal valid on Wyckoff structure alone)
+
+    BUY  — Monthly: RSI>60, MACD>0, hist>0, price>=upperBB(20,2)
+           Weekly : RSI>60, close>EMA12, EMA12>EMA26>EMA50
+    SHORT — Monthly: RSI<40, MACD<0, hist<0, price<=lowerBB(20,2)
+            Weekly : RSI<40, close<EMA12, EMA12<EMA26<EMA50
     """
     etypes = {e.event_type for e in events}
     has = lambda t: t in etypes
 
-    rsi_buy_ok   = rsi_cur < 50 and rsi_cur > rsi_prev
-    rsi_short_ok = rsi_cur > 50 and rsi_cur < rsi_prev
+    def buy_strength() -> str:
+        if monthly_confirm and weekly_confirm:
+            return "STRONG"
+        if monthly_confirm or weekly_confirm:
+            return "MODERATE"
+        return "WEAK"
+
+    def short_strength() -> str:
+        if monthly_short_confirm and weekly_short_confirm:
+            return "STRONG"
+        if monthly_short_confirm or weekly_short_confirm:
+            return "MODERATE"
+        return "WEAK"
+
+    def tf_note_buy() -> str:
+        ms = "OK" if monthly_confirm       else "NO"
+        ws = "OK" if weekly_confirm        else "NO"
+        m  = f"M[{ms}]: {monthly_detail}"  if monthly_detail  else f"M[{ms}]"
+        w  = f"W[{ws}]: {weekly_detail}"   if weekly_detail   else f"W[{ws}]"
+        return f"{m}. {w}."
+
+    def tf_note_short() -> str:
+        ms = "OK" if monthly_short_confirm       else "NO"
+        ws = "OK" if weekly_short_confirm        else "NO"
+        m  = f"M[{ms}]: {monthly_short_detail}"  if monthly_short_detail  else f"M[{ms}]"
+        w  = f"W[{ws}]: {weekly_short_detail}"   if weekly_short_detail   else f"W[{ws}]"
+        return f"{m}. {w}."
 
     if phase == "Accumulation":
         if sub_phase == "D":
@@ -510,31 +593,33 @@ def _generate_signal(
                 desc = (
                     f"Phase D — LPS confirmed after SOS. Ideal buy entry here. "
                     f"Stop loss below LPS low (~{support:.2f}). "
-                    f"Target breakout above resistance {resistance:.2f}."
+                    f"Target breakout above resistance {resistance:.2f}. "
+                    + tf_note_buy()
                 )
-                strength = "STRONG" if rsi_buy_ok else "MODERATE"
-                return ("BUY", strength, desc)
+                return ("BUY", buy_strength(), desc)
             desc = (
                 f"Phase D — SOS confirmed, markup likely. "
                 f"Buy on pullbacks that hold above {support:.2f}. "
-                f"Target {resistance:.2f}+."
+                f"Target {resistance:.2f}+. "
+                + tf_note_buy()
             )
-            return ("BUY", "MODERATE", desc)
+            return ("BUY", buy_strength(), desc)
 
         if sub_phase == "C":
             if has("Test"):
                 desc = (
                     f"Phase C — Spring + Test confirmed. High-probability entry. "
                     f"Buy near {support:.2f}, stop just below Spring low. "
-                    f"Wait for SOS to confirm full markup."
+                    f"Wait for SOS to confirm full markup. "
+                    + tf_note_buy()
                 )
-                strength = "STRONG" if rsi_buy_ok else "MODERATE"
-                return ("BUY", strength, desc)
+                return ("BUY", buy_strength(), desc)
             if has("Spring"):
-                return ("BUY", "MODERATE",
+                return ("BUY", buy_strength(),
                     f"Phase C — Spring detected. Entry possible, "
                     f"stop just below {support:.2f}. "
-                    f"Confirm with high-volume SOS before adding size.")
+                    f"Confirm with high-volume SOS before adding size. "
+                    + tf_note_buy())
 
         return ("WAIT", "WEAK",
             f"Accumulation Phase {sub_phase} — range building. "
@@ -546,23 +631,24 @@ def _generate_signal(
             desc = (
                 f"Phase D — LPSY confirmed, markdown imminent. "
                 f"Short here, stop above {resistance:.2f}. "
-                f"Target {support:.2f}."
+                f"Target {support:.2f}. "
+                + tf_note_short()
             )
-            strength = "STRONG" if rsi_short_ok else "MODERATE"
-            return ("SHORT", strength, desc)
+            return ("SHORT", short_strength(), desc)
         if sub_phase == "C":
             if has("UTAD"):
                 desc = (
                     f"Phase C — UTAD confirmed (second upthrust). "
-                    f"Strong short signal. Stop above {resistance:.2f}."
+                    f"Strong short signal. Stop above {resistance:.2f}. "
+                    + tf_note_short()
                 )
-                strength = "STRONG" if rsi_short_ok else "MODERATE"
-                return ("SHORT", strength, desc)
+                return ("SHORT", short_strength(), desc)
             if has("UT"):
-                return ("SHORT", "MODERATE",
+                return ("SHORT", short_strength(),
                     f"Phase C — Upthrust detected. "
                     f"Short near current price, stop above {resistance:.2f}. "
-                    f"Target {support:.2f}.")
+                    f"Target {support:.2f}. "
+                    + tf_note_short())
 
         return ("WAIT", "WEAK",
             f"Distribution Phase {sub_phase} — watch for Upthrust (Phase C) "
@@ -732,6 +818,220 @@ def _percentile(values: list[float], pct: int) -> float:
     k = (len(sorted_v) - 1) * pct / 100
     lo, hi = int(k), min(int(k) + 1, len(sorted_v) - 1)
     return sorted_v[lo] + (sorted_v[hi] - sorted_v[lo]) * (k - lo)
+
+
+def _resample(bars: list[dict], freq: str) -> list[dict]:
+    """Aggregate daily OHLCV bars to weekly ('W') or monthly ('M') bars."""
+    from collections import OrderedDict
+    groups: dict[str, list[dict]] = OrderedDict()
+    for b in bars:
+        date_str = str(b.get("date", ""))
+        if not date_str:
+            continue
+        try:
+            dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        except ValueError:
+            continue
+        if freq == "W":
+            iso = dt.isocalendar()
+            key = f"{iso[0]}-W{iso[1]:02d}"
+        else:
+            key = date_str[:7]
+        groups.setdefault(key, []).append(b)
+
+    result = []
+    for _, group in groups.items():
+        opens  = [_f(b.get("open"))  for b in group]
+        highs  = [_f(b.get("high"))  for b in group]
+        lows   = [_f(b.get("low"))   for b in group]
+        closes = [_f(b.get("close")) for b in group]
+        vols   = [max(0, int(b.get("volume") or 0)) for b in group]
+        valid_lows = [l for l in lows if l > 0]
+        result.append({
+            "date":   group[-1].get("date", ""),
+            "open":   opens[0],
+            "high":   max(highs),
+            "low":    min(valid_lows) if valid_lows else 0.0,
+            "close":  closes[-1],
+            "volume": sum(vols),
+        })
+    return result
+
+
+def _bollinger(
+    closes: list[float],
+    period: int = 20,
+    std_dev: float = 2.0,
+) -> tuple[list[float], list[float], list[float]]:
+    """Returns (upper, middle, lower) Bollinger Bands."""
+    n = len(closes)
+    upper  = [0.0] * n
+    middle = [0.0] * n
+    lower  = [0.0] * n
+    for i in range(period - 1, n):
+        window = [c for c in closes[i - period + 1 : i + 1] if c > 0]
+        if not window:
+            continue
+        m = statistics.mean(window)
+        s = statistics.stdev(window) if len(window) > 1 else 0.0
+        middle[i] = m
+        upper[i]  = m + std_dev * s
+        lower[i]  = m - std_dev * s
+    return upper, middle, lower
+
+
+def _check_monthly(monthly_bars: list[dict]) -> tuple[bool, str]:
+    """
+    Monthly frame conditions for BUY:
+      RSI(14) > 60
+      MACD(12,26,9) line > 0
+      MACD histogram > 0
+      Close >= upper Bollinger Band(20,2) × 0.98  (at or near upper band)
+    """
+    if len(monthly_bars) < 26:
+        return False, f"insufficient bars ({len(monthly_bars)}<26)"
+    closes = [_f(b.get("close")) for b in monthly_bars]
+    rsi_vals             = _rsi(closes, 14)
+    macd_line, _, hist   = _macd(closes)
+    bb_upper, _, _       = _bollinger(closes, 20, 2.0)
+
+    rsi_ok  = rsi_vals[-1]  > 60
+    macd_ok = macd_line[-1] > 0
+    hist_ok = hist[-1]      > 0
+    bb_ok   = bb_upper[-1] > 0 and closes[-1] >= bb_upper[-1] * 0.98
+
+    ok = rsi_ok and macd_ok and hist_ok and bb_ok
+    detail = (
+        f"RSI {rsi_vals[-1]:.1f}{'✓' if rsi_ok else '✗'}, "
+        f"MACD {macd_line[-1]:.3f}{'✓' if macd_ok else '✗'}, "
+        f"hist {hist[-1]:.3f}{'✓' if hist_ok else '✗'}, "
+        f"BB {closes[-1]:.2f}/{'upperband' if bb_ok else f'{bb_upper[-1]:.2f}'}"
+    )
+    return ok, detail
+
+
+def _check_weekly(weekly_bars: list[dict]) -> tuple[bool, str]:
+    """
+    Weekly frame conditions for BUY:
+      RSI(14) > 60
+      Close > EMA(12)
+      EMA(12) > EMA(26) > EMA(50)
+    """
+    if len(weekly_bars) < 50:
+        return False, f"insufficient bars ({len(weekly_bars)}<50)"
+    closes  = [_f(b.get("close")) for b in weekly_bars]
+    rsi_vals = _rsi(closes, 14)
+    ema12   = _ema(closes, 12)
+    ema26   = _ema(closes, 26)
+    ema50   = _ema(closes, 50)
+
+    c = closes[-1]
+    e12, e26, e50 = ema12[-1], ema26[-1], ema50[-1]
+
+    rsi_ok  = rsi_vals[-1] > 60
+    ema_ok  = e12 > 0 and e26 > 0 and e50 > 0 and c > e12 > e26 > e50
+
+    ok = rsi_ok and ema_ok
+    detail = (
+        f"RSI {rsi_vals[-1]:.1f}{'✓' if rsi_ok else '✗'}, "
+        f"EMA12 {e12:.2f} EMA26 {e26:.2f} EMA50 {e50:.2f}"
+        f"{'✓' if ema_ok else '✗'}"
+    )
+    return ok, detail
+
+
+def _check_monthly_short(monthly_bars: list[dict]) -> tuple[bool, str]:
+    """
+    Monthly frame conditions for SHORT:
+      RSI(14) < 40
+      MACD(12,26,9) line < 0
+      MACD histogram < 0
+      Close <= lower Bollinger Band(20,2) × 1.02  (at or near lower band)
+    """
+    if len(monthly_bars) < 26:
+        return False, f"insufficient bars ({len(monthly_bars)}<26)"
+    closes = [_f(b.get("close")) for b in monthly_bars]
+    rsi_vals           = _rsi(closes, 14)
+    macd_line, _, hist = _macd(closes)
+    _, _, bb_lower     = _bollinger(closes, 20, 2.0)
+
+    rsi_ok  = rsi_vals[-1]  < 40
+    macd_ok = macd_line[-1] < 0
+    hist_ok = hist[-1]      < 0
+    bb_ok   = bb_lower[-1] > 0 and closes[-1] <= bb_lower[-1] * 1.02
+
+    ok = rsi_ok and macd_ok and hist_ok and bb_ok
+    detail = (
+        f"RSI {rsi_vals[-1]:.1f}{'✓' if rsi_ok else '✗'}, "
+        f"MACD {macd_line[-1]:.3f}{'✓' if macd_ok else '✗'}, "
+        f"hist {hist[-1]:.3f}{'✓' if hist_ok else '✗'}, "
+        f"BB {closes[-1]:.2f}/{'lowerband' if bb_ok else f'{bb_lower[-1]:.2f}'}"
+    )
+    return ok, detail
+
+
+def _check_weekly_short(weekly_bars: list[dict]) -> tuple[bool, str]:
+    """
+    Weekly frame conditions for SHORT:
+      RSI(14) < 40
+      Close < EMA(12)
+      EMA(12) < EMA(26) < EMA(50)
+    """
+    if len(weekly_bars) < 50:
+        return False, f"insufficient bars ({len(weekly_bars)}<50)"
+    closes   = [_f(b.get("close")) for b in weekly_bars]
+    rsi_vals = _rsi(closes, 14)
+    ema12    = _ema(closes, 12)
+    ema26    = _ema(closes, 26)
+    ema50    = _ema(closes, 50)
+
+    c = closes[-1]
+    e12, e26, e50 = ema12[-1], ema26[-1], ema50[-1]
+
+    rsi_ok = rsi_vals[-1] < 40
+    ema_ok = e12 > 0 and e26 > 0 and e50 > 0 and c < e12 < e26 < e50
+
+    ok = rsi_ok and ema_ok
+    detail = (
+        f"RSI {rsi_vals[-1]:.1f}{'✓' if rsi_ok else '✗'}, "
+        f"EMA12 {e12:.2f} EMA26 {e26:.2f} EMA50 {e50:.2f}"
+        f"{'✓' if ema_ok else '✗'}"
+    )
+    return ok, detail
+
+
+def _ema(values: list[float], period: int) -> list[float]:
+    """Exponential moving average seeded from the first non-zero run of `period` bars."""
+    result = [0.0] * len(values)
+    k = 2.0 / (period + 1)
+    n = len(values)
+    start = next((i for i in range(n) if values[i] != 0.0), None)
+    if start is None or n - start < period:
+        return result
+    seed = _mean(values[start : start + period])
+    result[start + period - 1] = seed
+    for i in range(start + period, n):
+        result[i] = values[i] * k + result[i - 1] * (1 - k)
+    return result
+
+
+def _macd(
+    closes: list[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[list[float], list[float], list[float]]:
+    """MACD(fast, slow, signal). Returns (macd_line, signal_line, histogram)."""
+    ema_fast = _ema(closes, fast)
+    ema_slow = _ema(closes, slow)
+    n = len(closes)
+    macd_line = [
+        ema_fast[i] - ema_slow[i] if ema_slow[i] != 0.0 else 0.0
+        for i in range(n)
+    ]
+    signal_line = _ema(macd_line, signal)
+    histogram = [macd_line[i] - signal_line[i] for i in range(n)]
+    return macd_line, signal_line, histogram
 
 
 def _empty(symbol: str, reason: str) -> WyckoffAnalysis:

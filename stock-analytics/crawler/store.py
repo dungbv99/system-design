@@ -658,6 +658,84 @@ class Store:
         d["created_at"] = d["created_at"].isoformat() if d["created_at"] else None
         return d
 
+    # ── Quarterly report analyses ─────────────────────────────────────────────
+
+    def ensure_report_analyses_table(self):
+        """Idempotent — lets existing deployments pick up the table without a migration."""
+        sql = """
+            CREATE TABLE IF NOT EXISTS report_analyses (
+                symbol     VARCHAR(50) NOT NULL,
+                year       SMALLINT    NOT NULL,
+                quarter    SMALLINT    NOT NULL,
+                provider   VARCHAR(20) NOT NULL DEFAULT 'gemini',
+                title      TEXT,
+                pdf_url    TEXT,
+                model      VARCHAR(80),
+                analysis   TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (symbol, year, quarter, provider)
+            )
+        """
+        migrate = """
+            ALTER TABLE report_analyses
+                ADD COLUMN IF NOT EXISTS provider VARCHAR(20) NOT NULL DEFAULT 'gemini';
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.key_column_usage
+                    WHERE table_name = 'report_analyses'
+                      AND constraint_name = 'report_analyses_pkey'
+                      AND column_name = 'provider'
+                ) THEN
+                    ALTER TABLE report_analyses DROP CONSTRAINT report_analyses_pkey;
+                    ALTER TABLE report_analyses
+                        ADD PRIMARY KEY (symbol, year, quarter, provider);
+                END IF;
+            END $$;
+        """
+        with self._cursor() as cur:
+            cur.execute(sql)
+            cur.execute(migrate)
+
+    def upsert_report_analysis(self, symbol: str, year: int, quarter: int,
+                               title: str, pdf_url: str, model: str, analysis: str,
+                               provider: str = "gemini"):
+        sql = """
+            INSERT INTO report_analyses (symbol, year, quarter, provider, title, pdf_url, model, analysis)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (symbol, year, quarter, provider) DO UPDATE SET
+                title      = EXCLUDED.title,
+                pdf_url    = EXCLUDED.pdf_url,
+                model      = EXCLUDED.model,
+                analysis   = EXCLUDED.analysis,
+                created_at = NOW()
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (symbol.upper(), year, quarter, provider,
+                              title, pdf_url, model, analysis))
+
+    def get_report_analysis(self, symbol: str, year: int, quarter: int,
+                            provider: str = "gemini") -> Optional[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM report_analyses
+                   WHERE symbol = %s AND year = %s AND quarter = %s AND provider = %s""",
+                (symbol.upper(), year, quarter, provider),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_latest_report_analysis(self, symbol: str,
+                                   provider: str = "gemini") -> Optional[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM report_analyses WHERE symbol = %s AND provider = %s
+                   ORDER BY year DESC, quarter DESC LIMIT 1""",
+                (symbol.upper(), provider),
+            )
+            row = cur.fetchone()
+        return dict(row) if row else None
+
     # ── Paper trades (assumed buys) ───────────────────────────────────────────
 
     def get_latest_close(self, symbol: str) -> Optional[float]:

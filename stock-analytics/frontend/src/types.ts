@@ -308,3 +308,21 @@ export interface BacktestResponse {
   signal_replay?: BacktestResult
   event_trades?:  BacktestResult
 }
+
+// ── Quarterly report analysis (BCTC → Gemini) ─────────────────────────────────
+
+export type ReportProvider = 'gemini' | 'claude'
+
+export interface ReportAnalysis {
+  status: 'ready' | 'running' | 'error' | 'none'
+  symbol?: string
+  year?: number
+  quarter?: number
+  provider?: ReportProvider
+  title?: string
+  pdf_url?: string
+  model?: string
+  analysis?: string
+  created_at?: string
+  error?: string
+}

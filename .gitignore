@@ -5,3 +5,6 @@ target/
 *.ipr
 *.log
 .DS_Store
+.env
+.claude/worktrees/
+stock-analytics/*.pdf

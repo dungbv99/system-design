@@ -1,4 +1,4 @@
-import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, MultifactorSignal, MultifactorPage, Prediction, PredictionPage, PortfolioPage, PortfolioBacktest } from './types'
+import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, MultifactorSignal, MultifactorPage, Prediction, PredictionPage, PortfolioPage, PortfolioBacktest, ReportAnalysis } from './types'
 
 // ── VN Index constituents (approximate – HOSE rebalances quarterly) ──────────
 // symbols  → small/fixed indices: load by exact symbol list
@@ -230,6 +230,14 @@ export const api = {
   computeWyckoff: (exchanges = 'all'): Promise<{ message: string; exchanges: string[] | string }> =>
     fetch(`/api/wyckoff/compute?exchanges=${encodeURIComponent(exchanges)}`, { method: 'POST' })
       .then(r => r.json()),
+  reportAnalysis: (symbol: string, provider = 'gemini'): Promise<ReportAnalysis> =>
+    fetch(`/api/symbols/${encodeURIComponent(symbol)}/report-analysis?provider=${provider}`).then(r => r.json()),
+  computeReportAnalysis: (symbol: string, provider = 'gemini'): Promise<{ message: string; symbol: string; provider: string }> =>
+    fetch(`/api/symbols/${encodeURIComponent(symbol)}/report-analysis?provider=${provider}`, { method: 'POST' })
+      .then(async r => {
+        if (!r.ok) throw new Error((await r.json()).detail ?? `HTTP ${r.status}`)
+        return r.json()
+      }),
   multifactorSignals: (signal = '', minScore = 0, confidence = '', limit = 2000, offset = 0): Promise<MultifactorPage> =>
     fetch(`/api/multifactor/signals?signal=${signal}&min_score=${minScore}&confidence=${confidence}&limit=${limit}&offset=${offset}`)
       .then(r => r.json()),

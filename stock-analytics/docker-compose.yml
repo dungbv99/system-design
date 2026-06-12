@@ -27,6 +27,10 @@ services:
       WORKERS: "5"           # concurrent symbol fetches
       RUN_NOW: "0"           # set to "1" to trigger an immediate crawl on startup
       API_PORT: "8090"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"            # for quarterly-report analysis (aistudio.google.com)
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.5-flash}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"      # for quarterly-report analysis with Claude (console.anthropic.com)
+      CLAUDE_MODEL: "${CLAUDE_MODEL:-claude-opus-4-8}"
     depends_on:
       postgres:
         condition: service_healthy

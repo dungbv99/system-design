@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Quote, WyckoffSignal, Prediction } from '../types'
+import type { ReactNode } from 'react'
+import type { Quote, WyckoffSignal, Prediction, ReportAnalysis } from '../types'
 import { api } from '../api'
 import { DEFAULT_INDICATORS } from '../indicators/defs'
 import { fmtPrice } from '../utils'
@@ -318,6 +319,204 @@ function XGBPanel({ symbol }: { symbol: string }) {
   )
 }
 
+// ── Quarterly report panel (Vietstock BCTC → Gemini) ─────────────────────────
+
+/** Inline **bold** segments. */
+function mdBold(text: string, keyBase: string): ReactNode[] {
+  return text.split(/\*\*(.+?)\*\*/g).map((part, i) =>
+    i % 2 === 1
+      ? <strong key={`${keyBase}-${i}`} className="text-[#e6edf3] font-semibold">{part}</strong>
+      : part
+  )
+}
+
+/** Tiny markdown renderer: ## headings, "- " bullets, **bold**, _italic line_, paragraphs. */
+function MdLite({ text }: { text: string }) {
+  const out: ReactNode[] = []
+  let bullets: string[] = []
+  let key = 0
+
+  const flushBullets = () => {
+    if (!bullets.length) return
+    out.push(
+      <ul key={`ul${key++}`} className="list-disc pl-5 space-y-1 mb-3">
+        {bullets.map((b, i) => <li key={i} className="leading-relaxed">{mdBold(b, `b${key}-${i}`)}</li>)}
+      </ul>
+    )
+    bullets = []
+  }
+
+  for (const raw of text.split('\n')) {
+    const line = raw.trimEnd()
+    const t = line.trim()
+    if (!t) { flushBullets(); continue }
+    if (/^#{1,4}\s/.test(t)) {
+      flushBullets()
+      out.push(
+        <div key={`h${key++}`} className="text-[#58a6ff] font-bold text-sm mt-4 mb-2">
+          {mdBold(t.replace(/^#{1,4}\s*/, ''), `h${key}`)}
+        </div>
+      )
+    } else if (/^[-*]\s+/.test(t)) {
+      bullets.push(t.replace(/^[-*]\s+/, ''))
+    } else if (/^_.*_$/.test(t)) {
+      flushBullets()
+      out.push(
+        <div key={`i${key++}`} className="italic text-[#8b949e]/70 text-[11px] mt-3">
+          {t.replace(/^_|_$/g, '')}
+        </div>
+      )
+    } else {
+      flushBullets()
+      out.push(
+        <p key={`p${key++}`} className="mb-2 leading-relaxed">{mdBold(t, `p${key}`)}</p>
+      )
+    }
+  }
+  flushBullets()
+  return <div className="text-xs text-[#c9d1d9]">{out}</div>
+}
+
+const PROVIDERS = [
+  { id: 'gemini' as const, label: '✨ Gemini' },
+  { id: 'claude' as const, label: '🤖 Claude' },
+]
+
+function ReportPanel({ symbol }: { symbol: string }) {
+  const [provider, setProvider] = useState<'gemini' | 'claude'>('gemini')
+  const [data,     setData]     = useState<ReportAnalysis | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [errMsg,   setErrMsg]   = useState<string | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const load = useCallback(() => {
+    api.reportAnalysis(symbol, provider)
+      .then(setData)
+      .catch(() => setErrMsg('Không gọi được API — kiểm tra crawler logs.'))
+  }, [symbol, provider])
+
+  useEffect(() => {
+    setData(null); setErrMsg(null)
+    load()
+    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null } }
+  }, [load])
+
+  // Poll while the backend job runs (crawl + LLM ≈ 30–120s)
+  useEffect(() => {
+    if (data?.status === 'running' && !pollRef.current) {
+      pollRef.current = setInterval(load, 5000)
+    }
+    if (data?.status !== 'running' && pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }, [data, load])
+
+  const start = async () => {
+    setStarting(true); setErrMsg(null)
+    try {
+      await api.computeReportAnalysis(symbol, provider)
+      setData({ status: 'running' })
+    } catch (e) {
+      setErrMsg(e instanceof Error ? e.message : 'Không khởi động được phân tích')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const providerLabel = provider === 'claude' ? 'Claude' : 'Gemini'
+
+  const providerTabs = (
+    <div className="flex gap-1">
+      {PROVIDERS.map(p => (
+        <button key={p.id} onClick={() => setProvider(p.id)}
+          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
+            ${provider === p.id
+              ? 'bg-[#21262d] border-[#58a6ff] text-[#58a6ff]'
+              : 'border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}>
+          {p.label}
+        </button>
+      ))}
+    </div>
+  )
+
+  const startButton = (label: string) => (
+    <button
+      onClick={start}
+      disabled={starting || data?.status === 'running'}
+      className="px-4 py-2 bg-[#58a6ff] hover:bg-[#79b8ff] disabled:opacity-50 disabled:cursor-not-allowed
+                 text-[#0d1117] text-xs rounded-lg font-bold transition-all hover:scale-105 active:scale-95">
+      {starting ? 'Đang khởi động…' : label}
+    </button>
+  )
+
+  const body = () => {
+    if (!data && !errMsg) return (
+      <div className="animate-pulse text-xs text-[#8b949e] py-3 text-center">Đang kiểm tra…</div>
+    )
+
+    if (data?.status === 'running') return (
+      <div className="py-8 text-center space-y-2">
+        <div className="text-xs text-cyan-300 animate-pulse">
+          ⏳ Đang tải BCTC từ Vietstock và phân tích bằng {providerLabel}… (~1–2 phút)
+        </div>
+        <div className="text-[10px] text-[#8b949e]/60">Trang tự cập nhật khi xong — không cần tải lại.</div>
+      </div>
+    )
+
+    if (errMsg || data?.status === 'error') return (
+      <div className="py-6 text-center space-y-3">
+        <div className="text-xs text-red-300 bg-red-950/40 border border-red-800 rounded-lg px-3 py-2 inline-block max-w-lg">
+          ✕ {errMsg ?? data?.error ?? 'Lỗi không xác định'}
+        </div>
+        <div>{startButton('↻ Thử lại')}</div>
+      </div>
+    )
+
+    if (data?.status === 'ready') return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="text-xs">
+            <span className="font-bold text-[#e6edf3]">{data.title}</span>
+            {data.pdf_url && (
+              <a href={data.pdf_url} target="_blank" rel="noreferrer"
+                 className="ml-2 text-[#58a6ff] hover:underline">PDF gốc ↗</a>
+            )}
+            <div className="text-[10px] text-[#8b949e]/60 mt-0.5">
+              {data.model} · phân tích lúc {data.created_at?.slice(0, 16).replace('T', ' ')}
+            </div>
+          </div>
+          {startButton('↻ Kiểm tra quý mới')}
+        </div>
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 max-h-[28rem] overflow-y-auto">
+          <MdLite text={data.analysis ?? ''} />
+        </div>
+      </div>
+    )
+
+    // status === 'none' — chưa có phân tích nào
+    return (
+      <div className="py-8 text-center space-y-3">
+        <div className="text-xs text-[#8b949e]">
+          Chưa có phân tích BCTC bằng {providerLabel} cho <span className="text-[#e6edf3] font-semibold">{symbol}</span>.
+        </div>
+        <div className="text-[10px] text-[#8b949e]/60 max-w-md mx-auto">
+          Hệ thống sẽ crawl BCTC quý gần nhất từ Vietstock, gửi cho {providerLabel} phân tích
+          (chất lượng lợi nhuận, dòng tiền, định giá, kết hợp Wyckoff) rồi lưu lại — mỗi quý chỉ phân tích một lần cho mỗi AI.
+        </div>
+        {startButton(`📑 Phân tích bằng ${providerLabel}`)}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {providerTabs}
+      {body()}
+    </div>
+  )
+}
+
 interface Props {
   symbol:  string
   name:    string
@@ -331,7 +530,7 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
   const [showPicker,   setShowPicker]   = useState(false)
   const [fetchingHist, setFetchingHist] = useState(false)
   const [fetchMsg,     setFetchMsg]     = useState<string | null>(null)
-  const [activePanel,  setActivePanel]  = useState<'chart' | 'wyckoff' | 'xgb'>('chart')
+  const [activePanel,  setActivePanel]  = useState<'chart' | 'wyckoff' | 'xgb' | 'report'>('chart')
   const [buying,       setBuying]       = useState(false)
   const [buyMsg,       setBuyMsg]       = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -424,6 +623,7 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
               { id: 'chart',   label: '📈 Chart'   },
               { id: 'wyckoff', label: '〜 Wyckoff'  },
               { id: 'xgb',     label: '🤖 XGB Pred' },
+              { id: 'report',  label: '📑 BCTC'    },
             ] as const).map(({ id, label }) => (
               <button key={id} onClick={() => setActivePanel(id)}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
@@ -537,12 +737,19 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
             </div>
             <WyckoffPanel symbol={symbol} />
           </div>
-        ) : (
+        ) : activePanel === 'xgb' ? (
           <div className="mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
             <div className="text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3">
               XGBoost Prediction · 5-day horizon
             </div>
             <XGBPanel symbol={symbol} />
+          </div>
+        ) : (
+          <div className="mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
+            <div className="text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3">
+              Phân tích BCTC quý gần nhất · Vietstock → Gemini
+            </div>
+            <ReportPanel symbol={symbol} />
           </div>
         )}
 

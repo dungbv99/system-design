@@ -23,7 +23,10 @@ import datetime
 import wyckoff
 from wyckoff import analyze, classify_vsa_bars, _detect_range
 
-NV = 1_000_000  # neutral baseline volume
+# Neutral baseline volume. Large enough that close (~100) × volume clears the
+# 5B-VND liquidity gate — event detection itself only uses volume relative to
+# the average, so the absolute scale is free to pick.
+NV = 100_000_000
 
 
 # ── Synthetic data builders ───────────────────────────────────────────────────
@@ -61,9 +64,11 @@ def build_accumulation() -> list[dict]:
     p = 100.3
     for _ in range(3):                               # Test — holds above spring low
         o = p; c = p - 0.1; push(o, o + 0.2, o - 0.5, c, NV * 0.5); p = c
-    for _ in range(6):                               # SOS — strong rally on volume
-        o = p; p += 1.3; push(o, p + 0.5, o - 0.2, p, NV * 2)
-    push(p, p + 0.2, p - 0.7, p - 0.5, NV * 0.5)     # LPS — low-vol pullback
+    for _ in range(3):                               # SOS — strong rally on volume
+        o = p; p += 1.0; push(o, p + 0.5, o - 0.2, p, NV * 2)
+    for _ in range(2):                               # reaction toward support, normal vol
+        o = p; p -= 1.35; push(o, o + 0.3, p - 0.3, p, NV * 1.1)
+    push(p, p + 0.2, p - 0.6, p - 0.4, NV * 0.45)    # LPS — low-vol pullback near support
     return bars
 
 
@@ -133,6 +138,8 @@ def test_accumulation_sequence_produces_buy():
     # an actionable BUY must carry an entry and a protective stop below it
     assert r.entry_price is not None and r.stop_loss is not None
     assert r.stop_loss < r.entry_price
+    # the BUY survived the R:R gate, so the stored ratio must clear the minimum
+    assert r.rr_ratio is not None and r.rr_ratio >= wyckoff.MIN_RR_RATIO
 
 
 # ── 3. Distribution chain ─────────────────────────────────────────────────────

@@ -194,3 +194,17 @@ CREATE INDEX IF NOT EXISTS idx_predictions_signal  ON predictions   (signal, pre
 CREATE INDEX IF NOT EXISTS idx_predictions_score   ON predictions   (predicted_at DESC, score DESC);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_status  ON paper_trades  (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_symbol  ON paper_trades  (symbol);
+
+-- ── Quarterly financial-report analyses (Vietstock BCTC → LLM) ────────────────
+
+CREATE TABLE IF NOT EXISTS report_analyses (
+    symbol     VARCHAR(50) NOT NULL,
+    year       SMALLINT    NOT NULL,
+    quarter    SMALLINT    NOT NULL,
+    title      TEXT,
+    pdf_url    TEXT,
+    model      VARCHAR(80),
+    analysis   TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (symbol, year, quarter)
+);

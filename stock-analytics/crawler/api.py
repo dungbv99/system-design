@@ -303,6 +303,97 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         return {"message": f"Wyckoff analysis started for {scope}",
                 "exchanges": exch_list or "all"}
 
+    # ── Quarterly report analysis (Vietstock BCTC → Gemini / Claude) ─────────
+
+    store.ensure_report_analyses_table()
+    report_jobs: dict[str, dict] = {}          # "SYMBOL:provider" → {status, error}
+    report_lock = threading.Lock()
+
+    PROVIDER_KEYS = {"gemini": "GEMINI_API_KEY", "claude": "ANTHROPIC_API_KEY"}
+
+    def _provider_or_400(provider: str) -> str:
+        p = (provider or "gemini").strip().lower()
+        if p not in PROVIDER_KEYS:
+            raise HTTPException(400, f"provider phải là 'gemini' hoặc 'claude', nhận: {p}")
+        return p
+
+    @app.get("/api/symbols/{symbol}/report-analysis")
+    def get_report_analysis(symbol: str, provider: str = "gemini"):
+        """
+        Latest cached quarterly-report analysis for one symbol + provider,
+        plus the state of any in-flight analysis job:
+          {status: 'running'|'error'|'ready'|'none', ...row, error}
+        """
+        sym = symbol.strip().upper()
+        prov = _provider_or_400(provider)
+        key = f"{sym}:{prov}"
+        with report_lock:
+            job = dict(report_jobs.get(key) or {})
+        row = store.get_latest_report_analysis(sym, provider=prov)
+        if job.get("status") == "running":
+            return {"status": "running"}
+        if job.get("status") == "error":
+            return {"status": "error", "error": job.get("error", "unknown"),
+                    **({"previous": row} if row else {})}
+        if row:
+            return {"status": "ready", **row}
+        return {"status": "none"}
+
+    @app.post("/api/symbols/{symbol}/report-analysis", status_code=202)
+    def compute_report_analysis(symbol: str, provider: str = "gemini"):
+        """
+        Crawl the latest quarterly BCTC from Vietstock and analyze it with the
+        chosen provider (background job). Cached per (symbol, year, quarter,
+        provider) — if the newest report was already analyzed, the job
+        finishes instantly.
+        """
+        sym = symbol.strip().upper()
+        prov = _provider_or_400(provider)
+        key = f"{sym}:{prov}"
+        import os as _os
+        env_key = PROVIDER_KEYS[prov]
+        if not _os.environ.get(env_key, "").strip():
+            raise HTTPException(400, f"{env_key} chưa được cấu hình cho service crawler")
+        with report_lock:
+            if report_jobs.get(key, {}).get("status") == "running":
+                raise HTTPException(409, f"Analysis for {sym} ({prov}) is already running")
+            report_jobs[key] = {"status": "running"}
+
+        def run():
+            import report_analysis as ra
+            try:
+                report = ra.fetch_latest_report(sym)
+                year, quarter = report["year"], report["quarter"]
+                if store.get_report_analysis(sym, year, quarter, provider=prov):
+                    log.info("report %s/%s: Q%s/%s already analyzed (cache hit)",
+                             sym, prov, quarter, year)
+                else:
+                    wyckoff = store.get_wyckoff_signal(sym)
+                    quotes  = store.get_symbol_quotes(sym, days=30)
+                    prompt  = ra.build_prompt(sym, report["title"], wyckoff, quotes)
+                    log.info("report %s/%s: analyzing '%s' (%d KB)",
+                             sym, prov, report["title"], len(report["pdf_bytes"]) // 1024)
+                    analyze = ra.analyze_with_claude if prov == "claude" else ra.analyze_with_gemini
+                    text, model = analyze(report["pdf_bytes"], prompt)
+                    store.upsert_report_analysis(sym, year, quarter, report["title"],
+                                                 report["url"], model, text,
+                                                 provider=prov)
+                    log.info("report %s/%s: analysis stored (%d chars)", sym, prov, len(text))
+                with report_lock:
+                    report_jobs[key] = {"status": "done"}
+            except ra.ReportError as e:
+                log.error("report %s/%s: %s", sym, prov, e)
+                with report_lock:
+                    report_jobs[key] = {"status": "error", "error": str(e)}
+            except Exception as e:
+                log.exception("report %s/%s: unexpected failure", sym, prov)
+                with report_lock:
+                    report_jobs[key] = {"status": "error", "error": f"Lỗi không mong đợi: {e}"}
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": f"Report analysis started for {sym} ({prov})",
+                "symbol": sym, "provider": prov}
+
     # ── Multi-factor signals ──────────────────────────────────────────────────
 
     @app.get("/api/symbols/{symbol}/multifactor")
