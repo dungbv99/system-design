@@ -552,88 +552,227 @@ class BacktestResult:
 
 ---
 
-## 9. Optimizer (Grid Search)
+## 9. Optimizer — Bayesian (Optuna) + Iterative Manual Refinement
 
-File: `crawler/optimizer.py`
+### 9.1 Chiến lược tổng thể
 
-### 9.1 Parameter search space
+Kết hợp **Optuna Bayesian optimization** (tự học từ kết quả trước) với **vòng lặp iterative thủ công** (hiểu kinh tế đằng sau mỗi điều chỉnh):
+
+```
+Lần 1: Optuna 100 trials tự động
+            ↓
+        Xem kết quả → hiểu vấn đề
+        → cố định params có logic rõ ràng
+        → thu hẹp range params còn lại
+            ↓
+Lần 2: Optuna 100 trials trên search space nhỏ hơn
+            ↓
+        Xem kết quả → điều chỉnh tiếp
+            ↓
+Lần 3+: Tiếp tục cho đến khi đạt 20-30%/năm
+```
+
+Tại sao tốt hơn random search:
+- Optuna **học từ kết quả trước** — không thử mù như random
+- 200 trials Bayesian thường tốt hơn 1000 trials random
+- Vòng lặp manual giúp **loại bỏ params vô nghĩa** sớm, thu hẹp search space
+- Mỗi lần chỉnh có **lý do kinh tế rõ ràng**, không phải đoán mò
+
+### 9.2 Phân loại params — cố định vs optimize
+
+**Cố định — có lý do kinh tế rõ ràng, không cần optimize:**
 
 ```python
-PARAM_GRID = {
-    # Wyckoff core
-    'lookback':               [120, 180, 260],
-    'range_bars':             [80, 120, 160],
-    'pivot_bars':             [3, 5],
-    'climax_vol_mult':        [1.6, 1.8, 2.0, 2.2],
-    'hi_vol_mult':            [1.2, 1.4, 1.6],
-    'lo_vol_mult':            [0.5, 0.7, 0.8],
-
-    # RSI filters
-    'rsi_entry_max':          [45, 50, 55, 60],
-    'rsi_exit_min':           [65, 70, 75],
-
-    # ATR stop
-    'atr_stop_mult':          [1.5, 2.0, 2.5, 3.0],
-    'atr_trail_pct':          [0.80, 0.85, 0.90],
-
-    # Bollinger squeeze
-    'bb_squeeze_thresh':      [0.03, 0.05, 0.07],
-
-    # Entry quality score threshold
-    'min_signal_score':       [3, 4, 5],   # min number of indicators confirming
-
-    # Sector filter
-    'top_n_sectors':          [2, 3, 4],
-
-    # Regime detection
-    'downtrend_drawdown_pct': [0.08, 0.10, 0.12],
-    'regime_ma_fast':         [20, 50],
-    'regime_ma_slow':         [100, 200],
-
-    # RS filter
-    'rs_min_ratio':           [0.9, 1.0, 1.1],
-    'rs_exit_ratio':          [0.80, 0.85, 0.90],
+FIXED_PARAMS = {
+    "lookback":      260,   # 1 nam data la du de detect phase
+    "max_hold":      260,   # giu toi da 1 nam nhu thiet ke
+    "max_positions":   8,   # da dang hoa hop ly
+    "range_bars":    120,   # S/R detection window
+    "pivot_bars":      3,   # swing pivot confirmation
 }
 ```
 
-Total combinations: ~3 million. Use **random search** (500–1000 samples) first to find promising regions, then grid search locally around the best clusters.
-
-### 9.2 Optimization objective
+**Chỉ optimize những params thực sự không chắc:**
 
 ```python
-def objective(params: dict, data: dict, capital: float, train_split: tuple) -> float:
-    result = run_backtest(data, params, capital, *train_split)
+TUNE_PARAMS = {
+    # Wyckoff volume thresholds
+    "climax_vol_mult":        [1.6, 1.8, 2.0, 2.2],
+    "hi_vol_mult":            [1.2, 1.4, 1.6],
+    "lo_vol_mult":            [0.5, 0.7, 0.8],
+    # Entry filters
+    "rsi_entry_max":          [45, 50, 55],
+    "rsi_exit_min":           [65, 70, 75],
+    "bb_squeeze_thresh":      [0.03, 0.05, 0.07],
+    "min_signal_score":       [3, 4, 5],
+    # Risk management
+    "atr_stop_mult":          [1.5, 2.0, 2.5, 3.0],
+    "atr_trail_pct":          [0.80, 0.85, 0.90],
+    # Market filters
+    "top_n_sectors":          [2, 3, 4],
+    "downtrend_drawdown_pct": [0.08, 0.10, 0.12],
+    "rs_min_ratio":           [0.9, 1.0, 1.1],
+}
+# Tong: ~3,000 combinations thay vi 3 trieu → tractable voi Optuna
+```
 
-    # Multi-objective: maximize Sharpe, penalize drawdown, penalize too few trades
+### 9.3 `optimizer.py` — dùng Optuna
+
+```python
+# Cai Optuna (them vao requirements.txt)
+# optuna>=3.0
+
+import optuna
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+def make_objective(data, capital, train_split, regime_years=None):
+    """Tao objective function cho Optuna trial."""
+    start, end = train_split
+
+    def objective(trial):
+        params = dict(FIXED_PARAMS)  # bat dau tu params co dinh
+        # Optuna suggest gia tri cho tung TUNE_PARAM
+        for key, choices in TUNE_PARAMS.items():
+            params[key] = trial.suggest_categorical(key, choices)
+
+        # Neu co regime_years, chi chay tren nhung nam do
+        if regime_years:
+            scores = []
+            for year in regime_years:
+                res = obt.run_backtest(data, params, capital,
+                                       f"{year}-01-01", f"{year}-12-31")
+                scores.append(_score(res))
+            return sum(scores) / len(scores)
+
+        res = obt.run_backtest(data, params, capital, start, end)
+        return _score(res)
+
+    return objective
+
+
+def _score(result) -> float:
+    """Multi-objective score — cao hon la tot hon."""
+    annual = result.annual_return / 100.0
     score = (
         result.sharpe_ratio * 2.0
-        - max(0, result.max_drawdown - 0.25) * 5.0   # heavy penalty if DD > 25%
-        - max(0, 0.55 - result.win_rate) * 3.0        # penalty if win rate < 55%
-        + result.annual_return * 0.5                   # reward raw return
+        - max(0.0, result.max_drawdown - 0.25) * 5.0
+        - max(0.0, 0.55 - result.win_rate) * 3.0
+        + annual * 0.5
     )
+    if result.total_trades == 0:
+        score -= 1.0
     return score
+
+
+def run_optuna(data, capital, train_split, n_trials=100,
+               regime_years=None, n_jobs=7, study_name="wyckoff") -> optuna.Study:
+    """Chay Optuna Bayesian optimization, parallel tren n_jobs cores."""
+    study = optuna.create_study(
+        direction="maximize",
+        study_name=study_name,
+        sampler=optuna.samplers.TPESampler(seed=42),  # Bayesian TPE
+    )
+    study.optimize(
+        make_objective(data, capital, train_split, regime_years),
+        n_trials=n_trials,
+        n_jobs=n_jobs,       # song song 7 cores
+        show_progress_bar=True,
+    )
+    return study
+
+
+def optimize_per_regime(data, capital, n_trials=100) -> dict[str, dict]:
+    """Chay Optuna rieng cho tung regime."""
+    out = {}
+    for regime, years in REGIME_YEARS.items():
+        print(f"\nOptimizing {regime} ({years})...")
+        study = run_optuna(
+            data, capital,
+            train_split=("2014-01-01", "2025-12-31"),
+            n_trials=n_trials,
+            regime_years=years,
+            study_name=f"wyckoff_{regime.lower()}",
+        )
+        best = study.best_params
+        best.update(FIXED_PARAMS)  # merge voi fixed params
+        out[regime] = {
+            "params": best,
+            "sharpe": study.best_value,
+            "run_id": None,
+        }
+        print(f"  Best score: {study.best_value:.3f}")
+        print(f"  Best params: {best}")
+    return out
 ```
 
-### 9.3 Per-regime optimization
-
-Run optimizer separately for:
-1. UPTREND years (2017, 2019, 2020, 2021, 2024, 2025)
-2. SIDEWAYS years (2015, 2016, 2018, 2019, 2023)
-3. DOWNTREND years (2022) — optimize exit-only logic (when to re-enter after crash)
-
-### 9.4 Output — saved to DB and JSON
+### 9.4 Objective function
 
 ```python
-# Saved to backtest_params table
-OPTIMIZED_PARAMS = {
-    'UPTREND':   { ... best params for uptrend ... },
-    'SIDEWAYS':  { ... best params for sideways ... },
-    'DOWNTREND': { ... defensive exit params ... },
-}
-# Also saved to crawler/optimized_params.json for quick loading without DB query
+# Muc tieu uu tien:
+score = (
+    sharpe_ratio * 2.0                          # 1. Sharpe cao (quan trong nhat)
+    - max(0, max_drawdown - 0.25) * 5.0         # 2. Phat nang neu DD > 25%
+    - max(0, 0.55 - win_rate) * 3.0             # 3. Phat neu win rate < 55%
+    + annual_return/100 * 0.5                   # 4. Thuong return cao
+)
 ```
 
----
+### 9.5 Vòng lặp iterative — `make claude-optimize`
+
+Sau mỗi lần Optuna chạy xong, Claude đọc kết quả và quyết định:
+- Params nào nên cố định (loại khỏi TUNE_PARAMS)
+- Range nào nên thu hẹp
+- Có cần thêm/bỏ indicator nào không
+
+```python
+# Quy tac Claude dung khi xem ket qua:
+
+if max_drawdown > 0.25:
+    # Tang atr_stop_mult, giam atr_trail_pct
+    # Co the co dinh atr_stop_mult o gia tri cao
+
+if annual_return < 0.20:
+    # Ha rsi_entry_max (mua som hon)
+    # Giam min_signal_score (de vao lenh hon)
+    # Kiem tra top_n_sectors co qua tat khong
+
+if win_rate < 0.55:
+    # Tang min_signal_score
+    # Tang rsi hang (chi mua khi RSI thap hon)
+    # Kiem tra indicator IC — bo indicator IC < 0.02
+
+if by_year["2022"] < -0.05:
+    # Regime detection chua tot
+    # Giam downtrend_drawdown_pct (detect som hon)
+
+# Sau khi hieu van de → co dinh params ro rang → chay lai voi search space nho hon
+```
+
+### 9.6 Walk-forward splits
+
+```
+Split 1: Train 2014-2016 → Test 2017
+Split 2: Train 2015-2017 → Test 2018
+Split 3: Train 2016-2018 → Test 2019
+Split 4: Train 2017-2019 → Test 2020
+Split 5: Train 2018-2020 → Test 2021
+Split 6: Train 2019-2021 → Test 2022
+Split 7: Train 2020-2022 → Test 2023
+Split 8: Train 2021-2023 → Test 2024
+Split 9: Train 2022-2024 → Test 2025
+
+Final params: weighted average cua splits co Sharpe > 1.0
+```
+
+### 9.7 Output — lưu sau mỗi iteration
+
+```python
+# output/optimization_log.md — Claude ghi lai tung buoc
+# output/optuna_study.db     — Optuna luu study de resume neu bi ngat
+# optimized_params.json      — params tot nhat hien tai
+# DB: optimized_params table
+```
+
 
 ## 10. Database Schema
 
@@ -1219,6 +1358,10 @@ full-pipeline:
 	@echo ""
 	@echo "XONG. Ket qua o output/"
 	@ls -lh output/
+
+claude-optimize:
+	@echo "Claude bat dau iterative optimization..."
+	@nohup claude "Read README_WYCKOFF_OPTIMIZED.md Section 9 for the full strategy.Read crawler/wyckoff_opt.py for DEFAULT_PARAMS and FIXED_PARAMS.Read crawler/optimizer.py for TUNE_PARAMS and Optuna setup.Do this iterative loop (max 10 iterations):ITERATION START:1. Run: make backtest-quick2. Read output/backtest_result.json3. Analyze:   - annual_return < 20%  → loosen entry (lower rsi_entry_max, lower min_signal_score)   - max_drawdown > 25%   → tighten stops (raise atr_stop_mult, lower atr_trail_pct)   - win_rate < 55%       → tighten entry (raise min_signal_score, lower rsi_entry_max)   - 2022 return < -5%    → lower downtrend_drawdown_pct (detect downtrend earlier)   - indicator IC < 0.02  → note which indicators are weak (do not remove yet)4. Decide which params to FREEZE (move from TUNE_PARAMS to FIXED_PARAMS)5. Narrow the range of remaining TUNE_PARAMS6. Edit crawler/wyckoff_opt.py and crawler/optimizer.py with changes7. Append to output/optimization_log.md: iteration number, changes made, reason, results8. REPEAT from step 1STOP when: annual_return >= 20% AND max_drawdown <= 25% AND win_rate >= 55% AND sharpe >= 1.0OR after 10 iterations.Write final summary to output/optimization_log.md with best params found." > output/claude_optimize.log 2>&1 &	@echo "Claude dang chay PID: $$!"	@echo "Xem tien trinh : tail -f output/claude_optimize.log"	@echo "Xem ket qua    : tail -f output/optimization_log.md"
 
 clean-backtest:
 	@docker exec $(CRAWLER_CONTAINER) python3 -c "\
