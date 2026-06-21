@@ -19,6 +19,9 @@ services:
     build: ./crawler
     ports:
       - "8090:8090"
+    volumes:
+      - ./scripts:/app/scripts:ro     # Wyckoff-Optimized backtest helper scripts
+      - ./output:/app/output          # backtest result files (json/log/md) + optimized_params.json
     environment:
       DB_DSN: postgresql://postgres:postgres@postgres:5432/stock
       CRAWL_HOUR: "8"        # UTC hour — 08:00 UTC = 15:00 ICT (30 min after close)

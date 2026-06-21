@@ -183,6 +183,12 @@ def analyze_with_gemini(pdf_bytes: bytes, prompt: str) -> tuple[str, str]:
         raise ReportError(f"Gemini API lỗi HTTP {r.status_code}: {detail}")
 
     data = r.json()
+    usage = data.get("usageMetadata") or {}
+    log.info(
+        "gemini tokens: prompt=%s output=%s total=%s",
+        usage.get("promptTokenCount"), usage.get("candidatesTokenCount"),
+        usage.get("totalTokenCount"),
+    )
     try:
         parts = data["candidates"][0]["content"]["parts"]
         text = "\n".join(p.get("text", "") for p in parts).strip()

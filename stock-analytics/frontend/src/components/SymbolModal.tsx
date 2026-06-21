@@ -594,7 +594,7 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
          onClick={e => { if (e.target === e.currentTarget) { setShowPicker(false); onClose() } }}>
-      <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-5 w-full max-w-5xl max-h-[95vh] overflow-y-auto shadow-2xl">
+      <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-4 w-full max-w-[92vw] max-h-[95vh] overflow-y-auto shadow-2xl">
 
         {/* Header */}
         <div className="flex items-start justify-between mb-4">
@@ -725,7 +725,7 @@ export function SymbolModal({ symbol, name, onClose }: Props) {
                 )}
               </div>
             ) : (
-              <div className="mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-3" onClick={() => setShowPicker(false)}>
+              <div className="mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-2" onClick={() => setShowPicker(false)}>
                 <InteractiveChart quotes={quotes} indicators={indicators} />
               </div>
             )}

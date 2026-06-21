@@ -256,6 +256,41 @@ export interface PortfolioBacktest {
   trades:       PortfolioTrade[]
 }
 
+// ── Derivatives (VN30F1M / VN30F2M / VN30 index) ──────────────────────────────
+
+export interface BasisRow {
+  date:           string
+  f1m_close:      number | null
+  f2m_close:      number | null
+  vn30_close:     number | null
+  basis:          number | null
+  basis_pct:      number | null
+  spread_f1m_f2m: number | null
+  regime:         'PREMIUM' | 'DISCOUNT' | 'NEUTRAL' | null
+}
+
+export interface DerivativesOi {
+  date:          string
+  open_interest: number | null
+  oi_change:     number | null
+}
+
+export interface IntradayBar {
+  time:   number      // unix seconds (ICT-shifted)
+  open:   number
+  high:   number
+  low:    number
+  close:  number
+  volume: number
+}
+
+export interface DerivativesSummary {
+  quote:       Quote | null
+  basis:       BasisRow | null
+  wyckoff:     WyckoffSignal | null
+  multifactor: MultifactorSignal | null
+}
+
 export interface IndicatorDef {
   id:       string
   label:    string
@@ -325,4 +360,39 @@ export interface ReportAnalysis {
   analysis?: string
   created_at?: string
   error?: string
+}
+
+// ── Mutual funds (fmarket equity funds & holdings) ────────────────────────────
+
+export interface FundHolding {
+  stock_code:        string
+  industry:          string | null
+  net_asset_percent: number
+  price:             number | null
+  update_at:         string | null
+  company_name:      string | null
+  exchange:          string | null
+}
+
+export interface Fund {
+  fund_id:          number
+  short_name:       string
+  name:             string
+  owner_name:       string | null
+  fund_type:        string | null
+  nav:              number | null
+  nav_update_at:    string | null
+  return_1m:        number | null
+  return_3m:        number | null
+  return_6m:        number | null
+  return_12m:       number | null
+  return_36m:       number | null
+  return_inception: number | null
+  holdings:         FundHolding[]
+}
+
+export interface FundsPage {
+  funds:      Fund[]
+  count:      number
+  updated_at: string | null
 }

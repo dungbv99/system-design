@@ -203,6 +203,13 @@ export const api = {
     wyckoffSignal: (symbol) => fetch(`/api/symbols/${encodeURIComponent(symbol)}/wyckoff`).then(r => r.json()),
     computeWyckoff: (exchanges = 'all') => fetch(`/api/wyckoff/compute?exchanges=${encodeURIComponent(exchanges)}`, { method: 'POST' })
         .then(r => r.json()),
+    reportAnalysis: (symbol, provider = 'gemini') => fetch(`/api/symbols/${encodeURIComponent(symbol)}/report-analysis?provider=${provider}`).then(r => r.json()),
+    computeReportAnalysis: (symbol, provider = 'gemini') => fetch(`/api/symbols/${encodeURIComponent(symbol)}/report-analysis?provider=${provider}`, { method: 'POST' })
+        .then(async (r) => {
+        if (!r.ok)
+            throw new Error((await r.json()).detail ?? `HTTP ${r.status}`);
+        return r.json();
+    }),
     multifactorSignals: (signal = '', minScore = 0, confidence = '', limit = 2000, offset = 0) => fetch(`/api/multifactor/signals?signal=${signal}&min_score=${minScore}&confidence=${confidence}&limit=${limit}&offset=${offset}`)
         .then(r => r.json()),
     multifactorSignal: (symbol) => fetch(`/api/symbols/${encodeURIComponent(symbol)}/multifactor`).then(r => r.json()),
@@ -260,6 +267,28 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date, jobs }),
     }).then(async (r) => {
+        if (!r.ok) {
+            const b = await r.json().catch(() => ({}));
+            throw new Error(b.detail ?? r.statusText);
+        }
+        return r.json();
+    }),
+    // ── Derivatives (VN30F1M / VN30F2M / VN30 index) ─────────────────────────
+    derivativesSummary: () => fetch('/api/derivatives/summary').then(r => r.json()),
+    derivativesQuotes: (symbol, days = 120) => fetch(`/api/derivatives/quotes/${encodeURIComponent(symbol)}?days=${days}`).then(r => r.json()),
+    basis: (days = 90) => fetch(`/api/derivatives/basis?days=${days}`).then(r => r.json()),
+    derivativesOi: (symbol, days = 90) => fetch(`/api/derivatives/oi/${encodeURIComponent(symbol)}?days=${days}`).then(r => r.json()),
+    derivativesIntraday: (symbol, tf = '5', days = 10) => fetch(`/api/derivatives/intraday/${encodeURIComponent(symbol)}?tf=${tf}&days=${days}`).then(r => r.json()),
+    computeDerivatives: () => fetch('/api/derivatives/compute', { method: 'POST' }).then(async (r) => {
+        if (!r.ok) {
+            const b = await r.json().catch(() => ({}));
+            throw new Error(b.detail ?? r.statusText);
+        }
+        return r.json();
+    }),
+    // ── Mutual funds (fmarket equity funds & holdings) ───────────────────────
+    funds: () => fetch('/api/funds').then(r => r.json()),
+    refreshFunds: () => fetch('/api/funds/refresh', { method: 'POST' }).then(async (r) => {
         if (!r.ok) {
             const b = await r.json().catch(() => ({}));
             throw new Error(b.detail ?? r.statusText);

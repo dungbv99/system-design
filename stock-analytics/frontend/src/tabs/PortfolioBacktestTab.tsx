@@ -88,7 +88,7 @@ export function PortfolioBacktestTab() {
   const [loading, setLoading] = useState(true)
   const [running, setRunning] = useState(false)
   const [start,   setStart]   = useState<string>('2018-01-01')
-  const [slots,   setSlots]   = useState<number>(8)
+  const [slots,   setSlots]   = useState<number>(12)
   const [capital, setCapital] = useState<number>(DEFAULT_CAPITAL)
   const [detail,  setDetail]  = useState<{ symbol: string; name: string } | null>(null)
   const [yearFilter,   setYearFilter]   = useState<string>('all')
@@ -185,7 +185,9 @@ export function PortfolioBacktestTab() {
             Trades the Wyckoff <span className="text-emerald-300 font-semibold">BUY</span> signal across the
             VN100 basket from the chosen start date — one shared cash account, {slots} concurrent position slots,
             stop / target / timeout exits, and a <span className="text-amber-300 font-semibold">3-session minimum hold</span> (T+
-            settlement — bought shares can't be sold for the first few days). Long-only (VN has no practical single-stock shorting).
+            settlement — bought shares can't be sold for the first few days). A walk-forward-validated <span className="text-sky-300 font-semibold">entry-confirmation
+            filter</span> (close&gt;MA50, RSI&gt;50, volume expansion, OBV rising, Bollinger %b&lt;0.9, plus a risk-on basket
+            regime) keeps the strategy out of counter-trend dips. Long-only (VN has no practical single-stock shorting).
           </p>
         </div>
         <div className="flex items-end gap-3 flex-wrap">

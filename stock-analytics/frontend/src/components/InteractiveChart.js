@@ -43,7 +43,7 @@ export function InteractiveChart({ quotes, indicators }) {
         const closes = quotes.map(q => q.close);
         // ── Price pane ────────────────────────────────────────────────────────────
         const priceChart = createChart(priceRef.current, {
-            ...THEME, crosshair: { mode: CrosshairMode.Normal }, height: 360,
+            ...THEME, crosshair: { mode: CrosshairMode.Normal }, height: 520,
         });
         const candleSeries = priceChart.addCandlestickSeries({
             upColor: '#34d399', downColor: '#f87171',
@@ -201,7 +201,7 @@ export function InteractiveChart({ quotes, indicators }) {
         };
         // ── Oscillator panes ──────────────────────────────────────────────────────
         if (indicators.has('rsi') && rsiRef.current) {
-            const c = makePane(rsiRef.current, 110);
+            const c = makePane(rsiRef.current, 140);
             const s = c.addLineSeries({ color: '#a78bfa', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(calcRSI(closes).flatMap((v, i) => v == null ? [] : [{ time: t(quotes[i]), value: +v.toFixed(2) }]));
             s.createPriceLine({ price: 70, color: '#ef4444', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '70' });
@@ -210,7 +210,7 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('macd') && macdRef.current) {
-            const c = makePane(macdRef.current, 110);
+            const c = makePane(macdRef.current, 140);
             const macdData = calcMACD(closes);
             const addMacdLine = (key, color) => {
                 const s = c.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
@@ -226,7 +226,7 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('stoch') && stochRef.current) {
-            const c = makePane(stochRef.current, 110);
+            const c = makePane(stochRef.current, 140);
             const stData = calcStoch(quotes);
             const addStLine = (key, color) => {
                 const s = c.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
@@ -240,7 +240,7 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('aroon') && aroonRef.current) {
-            const c = makePane(aroonRef.current, 100);
+            const c = makePane(aroonRef.current, 130);
             const arData = calcAroon(quotes);
             const mkLine = (key, color) => {
                 const s = c.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
@@ -253,7 +253,7 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('adx') && adxRef.current) {
-            const c = makePane(adxRef.current, 110);
+            const c = makePane(adxRef.current, 140);
             const adxData = calcADX(quotes);
             const mkLine = (key, color) => {
                 const s = c.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
@@ -266,7 +266,7 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('cci') && cciRef.current) {
-            const c = makePane(cciRef.current, 100);
+            const c = makePane(cciRef.current, 130);
             const s = c.addLineSeries({ color: '#eab308', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(calcCCI(quotes).flatMap((v, i) => v == null ? [] : [{ time: t(quotes[i]), value: +v.toFixed(2) }]));
             s.createPriceLine({ price: 100, color: '#ef4444', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '100' });
@@ -275,13 +275,13 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('atr') && atrRef.current) {
-            const c = makePane(atrRef.current, 90);
+            const c = makePane(atrRef.current, 120);
             const s = c.addLineSeries({ color: '#94a3b8', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(calcATR(quotes).flatMap((v, i) => v == null ? [] : [{ time: t(quotes[i]), value: v }]));
             c.timeScale().fitContent();
         }
         if (indicators.has('williamsr') && williamsrRef.current) {
-            const c = makePane(williamsrRef.current, 100);
+            const c = makePane(williamsrRef.current, 130);
             const s = c.addLineSeries({ color: '#06b6d4', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(calcWilliamsR(quotes).flatMap((v, i) => v == null ? [] : [{ time: t(quotes[i]), value: +v.toFixed(2) }]));
             s.createPriceLine({ price: -20, color: '#ef4444', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '-20' });
@@ -289,20 +289,20 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('obv') && obvRef.current) {
-            const c = makePane(obvRef.current, 90);
+            const c = makePane(obvRef.current, 120);
             const obv = calcOBV(quotes);
             const s = c.addLineSeries({ color: '#a3e635', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(obv.map((v, i) => ({ time: t(quotes[i]), value: v })));
             c.timeScale().fitContent();
         }
         if (indicators.has('bbw') && bbwRef.current) {
-            const c = makePane(bbwRef.current, 90);
+            const c = makePane(bbwRef.current, 120);
             const s = c.addLineSeries({ color: '#e879f9', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(calcBBW(closes).flatMap((v, i) => v == null ? [] : [{ time: t(quotes[i]), value: +v.toFixed(4) }]));
             c.timeScale().fitContent();
         }
         if (indicators.has('mfi') && mfiRef.current) {
-            const c = makePane(mfiRef.current, 110);
+            const c = makePane(mfiRef.current, 140);
             const s = c.addLineSeries({ color: '#26c6da', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(calcMFI(quotes).flatMap((v, i) => v == null ? [] : [{ time: t(quotes[i]), value: +v.toFixed(2) }]));
             s.createPriceLine({ price: 80, color: '#ef4444', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '80' });
@@ -311,14 +311,14 @@ export function InteractiveChart({ quotes, indicators }) {
             c.timeScale().fitContent();
         }
         if (indicators.has('roc') && rocRef.current) {
-            const c = makePane(rocRef.current, 90);
+            const c = makePane(rocRef.current, 120);
             const s = c.addLineSeries({ color: '#ffca28', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
             s.setData(calcROC(closes).flatMap((v, i) => v == null ? [] : [{ time: t(quotes[i]), value: +v.toFixed(2) }]));
             s.createPriceLine({ price: 0, color: '#4b5563', lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: false, title: '' });
             c.timeScale().fitContent();
         }
         if (indicators.has('cmf') && cmfRef.current) {
-            const c = makePane(cmfRef.current, 90);
+            const c = makePane(cmfRef.current, 120);
             const hist = c.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false });
             hist.setData(calcCMF(quotes).flatMap((v, i) => v == null ? [] : [{
                     time: t(quotes[i]), value: +v.toFixed(4),

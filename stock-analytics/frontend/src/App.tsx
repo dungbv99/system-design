@@ -6,12 +6,15 @@ import { MarketTab }    from './tabs/MarketTab'
 import { VnBoardTab }   from './tabs/VnBoardTab'
 import { IndustryTab }  from './tabs/IndustryTab'
 import { WyckoffTab }   from './tabs/WyckoffTab'
+import { WyckoffOptTab } from './tabs/WyckoffOptTab'
 import { MultiFactorTab } from './tabs/MultiFactorTab'
+import { DerivativesTab } from './tabs/DerivativesTab'
 import { BuyNowTab }    from './tabs/BuyNowTab'
 import { StrongBuyTab } from './tabs/StrongBuyTab'
 import { PortfolioTab } from './tabs/PortfolioTab'
 import { BacktestTab }  from './tabs/BacktestTab'
 import { PortfolioBacktestTab } from './tabs/PortfolioBacktestTab'
+import { FundsTab }     from './tabs/FundsTab'
 import { CrawlTab }     from './tabs/CrawlTab'
 import { HistoryTab }   from './tabs/HistoryTab'
 
@@ -21,7 +24,7 @@ export default function App() {
   const [stats,       setStats]       = useState<Stats | null>(null)
   const [crawlStatus, setCrawlStatus] = useState<CrawlStatus | null>(null)
   const [runs,        setRuns]        = useState<CrawlRun[]>([])
-  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'industry' | 'wyckoff' | 'multifactor' | 'buynow' | 'strongbuy' | 'portfolio' | 'backtest' | 'vn100bt' | 'crawl' | 'history'>('market')
+  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'industry' | 'wyckoff' | 'wyckoffopt' | 'multifactor' | 'derivatives' | 'buynow' | 'strongbuy' | 'portfolio' | 'backtest' | 'vn100bt' | 'funds' | 'crawl' | 'history'>('market')
   const [now,         setNow]         = useState(() => new Date())
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -54,12 +57,15 @@ export default function App() {
     { id: 'board',    label: '📊 VN Board'  },
     { id: 'industry', label: '🏭 Industry'  },
     { id: 'wyckoff',  label: '〜 Wyckoff'   },
+    { id: 'wyckoffopt', label: '✦ Wyckoff+' },
     { id: 'multifactor', label: '⚖ Multi-Factor' },
+    { id: 'derivatives', label: '🔗 Phái sinh' },
     { id: 'buynow',   label: '🎯 Buy Now'   },
     { id: 'strongbuy', label: '🔥 Strong Buy' },
     { id: 'portfolio', label: '💼 Portfolio' },
     { id: 'backtest', label: '⏪ Backtest'  },
     { id: 'vn100bt',  label: '📉 VN100 BT'  },
+    { id: 'funds',    label: '🏦 Funds'     },
     { id: 'crawl',    label: isRunning ? '⏳ Crawl' : '▶ Crawl' },
     { id: 'history',  label: '📋 History'  },
   ] as const
@@ -127,7 +133,7 @@ export default function App() {
       </div>
 
       {/* ── Tab nav ─────────────────────────────────────────────────────── */}
-      <div className="px-6 flex border-b border-[#30363d] bg-[#0d1117] sticky top-14 z-10">
+      <div className="px-6 flex border-b border-[#30363d] bg-[#0d1117] sticky top-14 z-10 overflow-x-auto scrollbar-none">
         {TABS.map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)}
             className={`px-5 py-3 text-sm font-medium border-b-4 transition-all cursor-pointer ${
@@ -146,12 +152,15 @@ export default function App() {
         {activeTab === 'board'    && <VnBoardTab />}
         {activeTab === 'industry' && <IndustryTab />}
         {activeTab === 'wyckoff'  && <WyckoffTab />}
+        {activeTab === 'wyckoffopt' && <WyckoffOptTab />}
         {activeTab === 'multifactor' && <MultiFactorTab />}
+        {activeTab === 'derivatives' && <DerivativesTab />}
         {activeTab === 'buynow'   && <BuyNowTab />}
         {activeTab === 'strongbuy' && <StrongBuyTab />}
         {activeTab === 'portfolio' && <PortfolioTab />}
         {activeTab === 'backtest' && <BacktestTab />}
         {activeTab === 'vn100bt'  && <PortfolioBacktestTab />}
+        {activeTab === 'funds'    && <FundsTab />}
         {activeTab === 'crawl'   && <CrawlTab crawlStatus={crawlStatus} isRunning={isRunning} onRefresh={refresh} />}
         {activeTab === 'history' && <HistoryTab runs={runs} />}
       </main>

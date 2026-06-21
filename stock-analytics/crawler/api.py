@@ -73,7 +73,7 @@ class PortfolioBacktestRequest(BaseModel):
     label:      str       = "VN100 Wyckoff 2018+"
     start_date: date      = date(2018, 1, 1)
     capital:    float     = 1_000_000_000.0
-    slots:      int       = 8
+    slots:      int       = 12
     cost_pct:   float     = 0.3
     min_hold:   int       = 3
     lot_size:   int       = 100
@@ -306,6 +306,7 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
     # ── Quarterly report analysis (Vietstock BCTC → Gemini / Claude) ─────────
 
     store.ensure_report_analyses_table()
+    store.ensure_derivatives_tables()
     report_jobs: dict[str, dict] = {}          # "SYMBOL:provider" → {status, error}
     report_lock = threading.Lock()
 
@@ -529,7 +530,90 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
             raise HTTPException(404, "Trade not found")
         return {"id": trade_id, "deleted": True}
 
-    # ── Backtest ──────────────────────────────────────────────────────────────
+    # ── Wyckoff-Optimized: regime, backtest, live signal ──────────────────────
+    # NOTE: these literal /api/backtest/* routes MUST be registered before the
+    # /api/backtest/{symbol} catch-all below, or FastAPI matches "runs",
+    # "params", "progress", "run" as a {symbol} (first-registered wins).
+
+    @app.get("/api/regime/latest")
+    def regime_latest():
+        store.ensure_wyckoff_opt_tables()
+        return store.get_regime() or {"regime": "SIDEWAYS", "note": "no regime computed yet"}
+
+    @app.get("/api/regime/history")
+    def regime_history(days: int = 365):
+        store.ensure_wyckoff_opt_tables()
+        return store.get_regime_history(days)
+
+    @app.get("/api/backtest/runs")
+    def backtest_runs(limit: int = 20):
+        store.ensure_wyckoff_opt_tables()
+        return store.get_backtest_runs(limit)
+
+    @app.get("/api/backtest/trades/{run_id}")
+    def backtest_trades(run_id: int):
+        store.ensure_wyckoff_opt_tables()
+        return store.get_backtest_trades(run_id)
+
+    @app.get("/api/backtest/params")
+    def backtest_params():
+        store.ensure_wyckoff_opt_tables()
+        return store.get_optimized_params()
+
+    @app.get("/api/backtest/progress")
+    def backtest_progress():
+        """Live backtest progress: {active, phase, overall_pct, eta_sec, …}.
+
+        Prefers the in-process tracker (when the backtest was started via
+        POST /api/backtest/run, it runs in this same process); falls back to the
+        on-disk file when a backtest was launched out-of-process (`make backtest`)."""
+        import progress
+        live = progress.get()
+        snap = live.snapshot() if live.active else progress.read()
+        snap["running"] = state.snapshot().get("running", False)
+        return snap
+
+    @app.post("/api/backtest/run", status_code=202)
+    def trigger_backtest(capital: float = 1_000_000_000, regime: str = "ALL", samples: int = 200):
+        """Kick off a full walk-forward backtest in the background. Poll
+        /api/backtest/runs for completion."""
+        if not state.acquire(str(date.today()), ["backtest"]):
+            raise HTTPException(409, "A crawl/backtest is already running")
+
+        def run():
+            try:
+                import opt_backtest
+                store.ensure_wyckoff_opt_tables()
+                opt_backtest.run_full_backtest(store, capital=capital,
+                                               n_random_samples=samples)
+            except Exception as e:
+                log.error("backtest run failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"status": "started", "message": "Backtest running in background",
+                "capital": capital, "samples": samples}
+
+    @app.get("/api/wyckoff-opt/{symbol}")
+    def wyckoff_opt_signal(symbol: str):
+        """Live optimized signal for a symbol using the current regime's params."""
+        import dataclasses
+
+        import wyckoff_opt
+        store.ensure_wyckoff_opt_tables()
+        sym = symbol.strip().upper()
+        reg_row = store.get_regime()
+        regime = reg_row["regime"] if reg_row else None
+        params = store.get_optimized_params(regime) if regime else dict(wyckoff_opt.DEFAULT_PARAMS)
+        bars = store.get_symbol_quotes(sym, days=400)
+        if not bars:
+            raise HTTPException(404, f"No quote data for {sym}")
+        index_bars = store.get_symbol_quotes("VNINDEX", days=400)
+        sig = wyckoff_opt.run_live_signal(sym, bars, index_bars or None, params, regime)
+        return dataclasses.asdict(sig)
+
+    # ── Backtest (single-symbol Wyckoff walk-forward) ─────────────────────────
 
     @app.get("/api/backtest/{symbol}")
     def symbol_backtest(
@@ -592,6 +676,87 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
 
         threading.Thread(target=run, daemon=True).start()
         return {"message": "portfolio backtest started", "label": req.label}
+
+    # ── Derivatives (VN30F1M / VN30F2M / VN30 index) ──────────────────────────
+
+    @app.get("/api/derivatives/quotes/{symbol}")
+    def derivatives_quotes(symbol: str, days: int = 120):
+        return store.get_derivatives_quotes(symbol.strip().upper(), days)
+
+    @app.get("/api/derivatives/basis")
+    def derivatives_basis(days: int = 90):
+        return store.get_basis(days)
+
+    @app.get("/api/derivatives/oi/{symbol}")
+    def derivatives_oi(symbol: str, days: int = 90):
+        return store.get_derivatives_oi(symbol.strip().upper(), days)
+
+    @app.get("/api/derivatives/intraday/{symbol}")
+    def derivatives_intraday(symbol: str, tf: str = "5", days: int = 10):
+        """Live intraday candles (not stored). tf ∈ {1,5,15,30,1H}."""
+        import client
+        if tf not in client.ENTRADE_RESOLUTIONS or tf == "1D":
+            raise HTTPException(400, f"tf must be one of {[k for k in client.ENTRADE_RESOLUTIONS if k != '1D']}")
+        try:
+            return client.fetch_derivatives_intraday(symbol.strip().upper(), tf, days)
+        except Exception as e:
+            log.error("intraday %s/%s failed: %s", symbol, tf, e)
+            raise HTTPException(502, f"Failed to fetch intraday data: {e}")
+
+    @app.get("/api/derivatives/summary")
+    def derivatives_summary():
+        """One-call payload for the Derivatives tab: latest VN30F1M quote, latest
+        basis row, and the Wyckoff + Multi-factor signals for VN30F1M."""
+        quote = store.get_derivatives_quotes("VN30F1M", days=1)
+        basis = store.get_basis(days=1)
+        return {
+            "quote":       quote[0] if quote else None,
+            "basis":       basis[0] if basis else None,
+            "wyckoff":     store.get_wyckoff_signal("VN30F1M"),
+            "multifactor": store.get_multifactor_signal("VN30F1M"),
+        }
+
+    @app.post("/api/derivatives/compute", status_code=202)
+    def compute_derivatives():
+        """Re-crawl VN30 derivatives and recompute basis + signals (background)."""
+        if not state.acquire(str(date.today()), ["derivatives"]):
+            raise HTTPException(409, "A crawl is already running")
+
+        def run():
+            try:
+                crawler.crawl_derivatives(date.today())
+            except Exception as e:
+                log.error("derivatives compute failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": "derivatives crawl started"}
+
+    # ── Mutual funds (fmarket equity funds & holdings) ────────────────────────
+
+    @app.get("/api/funds")
+    def get_funds():
+        """All equity funds with their current top stock holdings."""
+        store.ensure_funds_tables()
+        return store.get_funds_with_holdings()
+
+    @app.post("/api/funds/refresh", status_code=202)
+    def refresh_funds():
+        """Re-crawl the equity-fund list and holdings from fmarket (background job)."""
+        if not state.acquire(str(date.today()), ["funds"]):
+            raise HTTPException(409, "A crawl is already running")
+
+        def run():
+            try:
+                crawler.crawl_fund_holdings(date.today())
+            except Exception as e:
+                log.error("fund refresh failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": "fund refresh started"}
 
     # ── XGBoost predictions ───────────────────────────────────────────────────
 

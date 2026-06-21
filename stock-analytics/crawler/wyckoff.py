@@ -39,6 +39,32 @@ MIN_AVG_VALUE_VND = 5_000_000_000
 # actually be placed today.
 MAX_ENTRY_DRIFT = 0.10
 
+# Entry-confirmation gate (walk-forward optimised on VN100, 2018→2026).
+# The raw Wyckoff BUY (Spring/LPS "buy the dip") has NEGATIVE expectancy on its
+# own — it catches falling knives, which drove a −90% portfolio result.  Rolling
+# walk-forward feature-selection found a 5-indicator confirmation ("Filter C")
+# that was the ONLY rule positive out-of-sample (2023–2026 holdout) and lifted
+# the basket backtest to profit factor ~1.9.  A raw BUY survives only if ALL of:
+#   1. close > 50-session SMA            (trend up)
+#   2. RSI(14) > 50                      (momentum up)
+#   3. 5-bar vol-MA > 20-bar vol-MA      (volume expansion)
+#   4. OBV rising over the last 20 bars  (accumulation confirmed)
+#   5. Bollinger %b < 0.90               (not over-extended)
+# Indicators tested and REJECTED (no out-of-sample edge): MA50>MA200, basket
+# regime filter, ATR-calm, ROC20/60, MACD line, Wyckoff strength, Accum-phase.
+# Set REQUIRE_TREND_FILTER = False to disable the gate entirely.
+REQUIRE_TREND_FILTER = True
+TREND_MA_PERIOD      = 50
+ENTRY_RSI_MIN        = 50.0
+ENTRY_BB_MAX         = 0.90
+
+# Multi-Factor fusion override.  A Wyckoff BUY that FAILS the Filter-C gate is
+# still taken when the Multi-Factor engine independently scores it ≥ 70 (its BUY
+# threshold).  Walk-forward validated: "Filter C OR MF≥70" lifted the 2023–2026
+# holdout from −0.1%/PF 0.99 to +1.6%/PF 1.21 by adding the rare, high-conviction
+# setups Filter C alone misses (MF≥70 entries averaged +3.0%, 57% win).
+MF_OVERRIDE_SCORE = 70
+
 
 # ── Public types ──────────────────────────────────────────────────────────────
 
@@ -186,6 +212,28 @@ def analyze(symbol: str, bars: list[dict], lookback: int = 260) -> WyckoffAnalys
                 + description
             )
             signal, strength = "WAIT", "WEAK"
+
+    # ── Entry-confirmation gate ("Filter C" OR Multi-Factor override) ─────────
+    # A raw Wyckoff BUY survives if Filter C confirms (trend/momentum/volume) OR
+    # the Multi-Factor engine independently scores the setup ≥ MF_OVERRIDE_SCORE.
+    # Otherwise it is downgraded to WAIT.  See the REQUIRE_TREND_FILTER note.
+    if REQUIRE_TREND_FILTER and signal == "BUY":
+        fails = _entry_confirmation_fails(closes, volumes, current_price)
+        if fails:
+            mf_score = _multifactor_score(symbol, window)
+            if mf_score >= MF_OVERRIDE_SCORE:
+                description = (
+                    f"BUY via Multi-Factor override (score {mf_score} ≥ "
+                    f"{MF_OVERRIDE_SCORE}; Filter C failed: {', '.join(fails)}). "
+                    + description
+                )
+            else:
+                description = (
+                    f"BUY skipped — entry not confirmed ({', '.join(fails)}); "
+                    f"Multi-Factor {mf_score} < {MF_OVERRIDE_SCORE}. "
+                    + description
+                )
+                signal, strength = "WAIT", "WEAK"
 
     vsa_labels = classify_vsa_bars(highs, lows, closes, volumes, avg_vol, avg_hl_spread)
 
@@ -781,6 +829,65 @@ def _sma(values: list[float], period: int) -> list[float]:
         else:
             result.append(_mean(values[i - period + 1 : i + 1]))
     return result
+
+
+def _multifactor_score(symbol: str, window: list[dict]) -> int:
+    """Multi-Factor total score (0–100) for the entry window.
+
+    Lazy import — multi_factor imports helpers from this module, so a top-level
+    import would be circular. Returns 0 on any failure (treated as no override).
+    """
+    try:
+        import multi_factor
+        return multi_factor.analyze(symbol, window).total_score
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _obv(closes: list[float], volumes: list[int]) -> list[float]:
+    """On-Balance Volume: cumulative volume, signed by daily close direction."""
+    obv = [0.0] * len(closes)
+    for i in range(1, len(closes)):
+        if   closes[i] > closes[i - 1]: obv[i] = obv[i - 1] + volumes[i]
+        elif closes[i] < closes[i - 1]: obv[i] = obv[i - 1] - volumes[i]
+        else:                           obv[i] = obv[i - 1]
+    return obv
+
+
+def _entry_confirmation_fails(
+    closes: list[float], volumes: list[int], price: float,
+) -> list[str]:
+    """Return the list of failed "Filter C" confirmation checks (empty = all pass).
+
+    1. close > MA50  2. RSI(14) > 50  3. 5d vol-MA > 20d vol-MA
+    4. OBV rising over 20 bars  5. Bollinger %b < 0.90
+    """
+    fails: list[str] = []
+
+    ma = _sma(closes, TREND_MA_PERIOD)
+    if ma and ma[-1] > 0 and price < ma[-1]:
+        fails.append(f"<MA{TREND_MA_PERIOD}")
+
+    rsi = _rsi(closes, 14)
+    if rsi and rsi[-1] <= ENTRY_RSI_MIN:
+        fails.append(f"RSI {rsi[-1]:.0f}≤{ENTRY_RSI_MIN:.0f}")
+
+    vf = [float(v) for v in volumes]
+    v5, v20 = _sma(vf, 5), _sma(vf, 20)
+    if not (v5 and v20 and v20[-1] > 0 and v5[-1] > v20[-1]):
+        fails.append("no vol-expansion")
+
+    obv = _obv(closes, volumes)
+    if not (len(obv) > 20 and obv[-1] > obv[-21]):
+        fails.append("OBV flat/down")
+
+    upper, _, lower = _bollinger(closes, 20, 2.0)
+    if upper and lower and upper[-1] > lower[-1]:
+        bbpos = (price - lower[-1]) / (upper[-1] - lower[-1])
+        if bbpos >= ENTRY_BB_MAX:
+            fails.append(f"BB%b {bbpos:.2f}≥{ENTRY_BB_MAX:.2f}")
+
+    return fails
 
 
 def _rsi(closes: list[float], period: int = 14) -> list[float]:

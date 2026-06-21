@@ -27,11 +27,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
+import derivatives as derivatives_engine
 import multi_factor as multifactor_engine
 import wyckoff as wyckoff_engine
 
 from api import CrawlState, start_server
-from client import FireantClient
+from client import FireantClient, fetch_derivatives_oi, fetch_derivatives_quotes
 from store import Store
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -442,7 +443,7 @@ class Crawler:
         label:      str   = "VN100 Wyckoff 2018+",
         start_date: str   = "2018-01-01",
         capital:    float = 1_000_000_000.0,
-        slots:      int   = 8,
+        slots:      int   = 12,
         cost_pct:   float = 0.3,
         min_hold:   int   = 3,
         lot_size:   int   = 100,
@@ -481,6 +482,139 @@ class Crawler:
         )
         return bid
 
+    # ── Derivatives (VN30F1M / VN30F2M / VN30 index) ──────────────────────────
+
+    DERIV_SYMBOLS = ("VN30F1M", "VN30F2M", "VN30")
+
+    def crawl_derivatives(self, run_date: date) -> int:
+        """Crawl VN30 futures + index, compute basis/spread, and run the existing
+        Wyckoff + Multi-factor engines on VN30F1M.
+
+        Reuses the KBS provider for OHLCV; OI is optional and skipped gracefully.
+        """
+        run_id = self.store.start_run("derivatives", run_date)
+        try:
+            start = run_date - timedelta(days=2400)   # ~6.5y — Entrade serves from 2020
+            total = 0
+
+            # 1. Full-history OHLCV for F1M, F2M and the VN30 spot index (Entrade).
+            for symbol in self.DERIV_SYMBOLS:
+                quotes = fetch_derivatives_quotes(symbol, start, run_date)
+                total += self.store.upsert_derivatives_quotes(symbol, quotes)
+                log.info("derivatives %s: %d rows", symbol, len(quotes))
+
+            # 2. Open Interest for the live front-month contract (KBS).
+            for symbol in ("VN30F1M", "VN30F2M"):
+                oi_rows = fetch_derivatives_oi(symbol, run_date - timedelta(days=300), run_date)
+                if oi_rows:
+                    self.store.upsert_derivatives_oi(symbol, oi_rows)
+
+            # 3. Basis & spread over the full overlapping history.
+            f1m  = self.store.get_derivatives_quotes("VN30F1M", days=9999)
+            f2m  = self.store.get_derivatives_quotes("VN30F2M", days=9999)
+            vn30 = self.store.get_derivatives_quotes("VN30", days=9999)
+            basis_rows = derivatives_engine.compute_basis(f1m, f2m, vn30)
+            self.store.upsert_basis(basis_rows)
+            log.info("derivatives: %d basis rows", len(basis_rows))
+
+            # 4. Wyckoff + Multi-factor on VN30F1M (reuses the stock engines).
+            bars = self.store.get_derivatives_quotes("VN30F1M", days=300)
+            if len(bars) >= 30:
+                self.store.upsert_wyckoff_signal(
+                    wyckoff_engine.analyze("VN30F1M", bars, lookback=260))
+                self.store.upsert_multifactor_signal(
+                    multifactor_engine.analyze("VN30F1M", bars))
+            else:
+                log.warning("derivatives: only %d VN30F1M bars — skipping signals", len(bars))
+
+            self.store.finish_run(run_id, total)
+            return total
+        except Exception as e:
+            log.error("crawl_derivatives failed: %s", e)
+            self.store.finish_run(run_id, 0, str(e))
+            raise
+
+    # ── Market index OHLCV (VNINDEX) — Entrade ────────────────────────────────
+
+    INDEX_SYMBOLS = ("VNINDEX",)
+
+    def crawl_market_index(self, run_date: date, symbols: tuple[str, ...] | None = None,
+                           start_date: date | None = None) -> int:
+        """Crawl market-index OHLCV (VNINDEX) into `daily_quotes`.
+
+        Stored like any symbol so the Wyckoff/regime engines can read it via
+        `get_symbol_quotes`. Primary source is SSI iboard (full history from
+        index inception — VNINDEX from 2000-07-28); falls back to Entrade
+        (~2020+) if SSI fails. A placeholder row is upserted into `symbols`
+        first to satisfy the daily_quotes FK.
+        """
+        from client import Symbol, fetch_index_history
+        syms = symbols or self.INDEX_SYMBOLS
+        start = start_date or date(2000, 1, 1)
+        run_id = self.store.start_run("market_index", run_date)
+        total = 0
+        try:
+            for sym in syms:
+                self.store.upsert_symbols([Symbol(symbol=sym, name=sym, exchange="INDEX")])
+                try:
+                    quotes = fetch_index_history(sym, start, run_date)
+                    src = "SSI"
+                except Exception as e:  # noqa: BLE001
+                    log.warning("market index %s: SSI failed (%s), falling back to Entrade", sym, e)
+                    quotes = fetch_derivatives_quotes(sym, run_date - timedelta(days=2600), run_date)
+                    src = "Entrade"
+                n = self.store.upsert_quotes(sym, quotes)
+                total += n
+                log.info("market index %s via %s: %d rows (%s → %s)", sym, src, n,
+                         quotes[0].date if quotes else "-",
+                         quotes[-1].date if quotes else "-")
+            self.store.finish_run(run_id, total)
+            return total
+        except Exception as e:
+            log.error("crawl_market_index failed: %s", e)
+            self.store.finish_run(run_id, 0, str(e))
+            raise
+
+    # ── Mutual fund holdings (fmarket) ────────────────────────────────────────
+
+    def crawl_fund_holdings(self, run_date: date) -> int:
+        """Refresh the equity-fund list and every fund's top stock holdings.
+
+        Replaces the funds/fund_holdings tables wholesale so de-listed funds
+        and stocks a fund no longer holds disappear.
+        """
+        run_id = self.store.start_run("funds", run_date)
+        try:
+            self.store.ensure_funds_tables()
+            funds = self.client.get_stock_funds()
+            if not funds:
+                log.warning("fund crawl: fmarket returned no equity funds")
+                self.store.finish_run(run_id, 0)
+                return 0
+
+            holdings_by_fund: dict[int, list] = {}
+
+            def load(f):
+                try:
+                    return f.fund_id, self.client.get_fund_holdings(f.fund_id)
+                except Exception as e:
+                    log.warning("fund holdings %s (%d) failed: %s", f.short_name, f.fund_id, e)
+                    return f.fund_id, []
+
+            with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+                for fut in as_completed([pool.submit(load, f) for f in funds]):
+                    fid, hs = fut.result()
+                    holdings_by_fund[fid] = hs
+
+            nf, nh = self.store.replace_funds(funds, holdings_by_fund)
+            self.store.finish_run(run_id, nf)
+            log.info("fund crawl done: %d funds, %d holdings", nf, nh)
+            return nf
+        except Exception as e:
+            self.store.finish_run(run_id, 0, str(e))
+            log.error("fund crawl failed: %s", e)
+            raise
+
     # ── Full daily run ────────────────────────────────────────────────────────
 
     def run_daily(self, run_date: date):
@@ -513,6 +647,24 @@ class Crawler:
         # XGBoost predictions — train on history, score today's snapshot
         self.compute_predictions()
 
+        # Mutual-fund holdings (fmarket) — best-effort, must not break the run
+        try:
+            self.crawl_fund_holdings(run_date)
+        except Exception as e:
+            log.error("fund holdings crawl failed (continuing): %s", e)
+
+        # Derivatives (VN30F1M/F2M/VN30) — best-effort, must not break the run
+        try:
+            self.crawl_derivatives(run_date)
+        except Exception as e:
+            log.error("derivatives crawl failed (continuing): %s", e)
+
+        # Wyckoff-Optimized: detect today's VNIndex regime + live VN100 scan
+        try:
+            run_live_wyckoff_opt(self.store)
+        except Exception as e:
+            log.error("wyckoff-opt live run failed (continuing): %s", e)
+
         elapsed = time.monotonic() - t0
         log.info("═══ daily crawl complete in %.1fs ═══", elapsed)
 
@@ -534,6 +686,63 @@ def previous_trading_day() -> date:
     while d.weekday() >= 5:  # 5=Sat, 6=Sun
         d -= timedelta(days=1)
     return d
+
+
+# ── Wyckoff-Optimized daily live run ──────────────────────────────────────────
+
+def run_live_wyckoff_opt(store: Store) -> dict:
+    """Daily job — detect today's VNIndex regime and scan VN100 with the
+    optimized, regime-specific params.  Reads only from the DB (no API calls).
+
+    Persists the regime to ``regime_history`` and returns a summary dict of the
+    BUY candidates (also available live per-symbol via GET /api/wyckoff-opt/{sym}).
+    See README_WYCKOFF_OPTIMIZED.md §14.
+    """
+    import regime as regime_mod
+    import wyckoff_opt
+
+    store.ensure_wyckoff_opt_tables()
+
+    # 1. Detect today's regime from VNIndex.
+    vnindex_bars = store.get_symbol_quotes("VNINDEX", days=400)
+    if not vnindex_bars:
+        log.warning("wyckoff-opt: no VNINDEX data — run crawl_market_index first")
+        return {"regime": None, "buys": []}
+    reg = regime_mod.detect_regime_today(vnindex_bars)
+    today = str(reg.date or date.today())
+    store.upsert_regime(today, {
+        "regime": reg.regime, "vnindex": reg.vnindex_close,
+        "ma20": reg.ma20, "ma50": reg.ma50, "ma200": reg.ma200,
+        "macd_hist": reg.macd_hist, "drawdown": reg.drawdown_from_60d_high,
+        "wyckoff_phase": reg.wyckoff_phase,
+    })
+    log.info("wyckoff-opt: regime=%s (confirmed=%s, drawdown=%.1f%%)",
+             reg.regime, reg.confirmed, (reg.drawdown_from_60d_high or 0) * 100)
+
+    # 2. Load optimized params for the current regime (DEFAULT if none yet).
+    params = store.get_optimized_params(reg.regime)
+
+    # 3. Scan VN100 for BUY signals.
+    symbols = store.get_vn100_symbols()
+    buys: list[dict] = []
+    for sym in symbols:
+        bars = store.get_symbol_quotes(sym, days=400)
+        if not bars or len(bars) < 60:
+            continue
+        try:
+            sig = wyckoff_opt.run_live_signal(sym, bars, vnindex_bars, params, reg.regime)
+        except Exception as e:  # noqa: BLE001
+            log.debug("wyckoff-opt %s: %s", sym, e)
+            continue
+        if sig.signal == "BUY":
+            buys.append({"symbol": sym, "score": sig.score, "phase": sig.phase,
+                         "sub_phase": sig.sub_phase, "entry": sig.entry_price,
+                         "stop": sig.stop_loss, "rsi": sig.rsi})
+
+    buys.sort(key=lambda b: b["score"], reverse=True)
+    log.info("wyckoff-opt: %d BUY candidates in %s regime: %s",
+             len(buys), reg.regime, ", ".join(b["symbol"] for b in buys[:10]))
+    return {"regime": reg.regime, "buys": buys}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

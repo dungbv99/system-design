@@ -10,7 +10,7 @@ import psycopg2.extras
 import psycopg2.pool
 from psycopg2.extras import Json
 
-from client import DailyQuote, Fundamental, NewsPost, Symbol
+from client import DailyQuote, FundHolding, FundInfo, Fundamental, NewsPost, Symbol
 
 log = logging.getLogger(__name__)
 
@@ -627,6 +627,165 @@ class Store:
             rows = cur.fetchall()
         return {"total": total, "items": [dict(r) for r in rows]}
 
+    # ── Derivatives (VN30F1M / VN30F2M / VN30 index) ──────────────────────────
+
+    def ensure_derivatives_tables(self):
+        """Idempotent — lets existing deployments pick up the tables (and the
+        synthetic VN30F1M symbol row) without re-running init.sql."""
+        sql = """
+            CREATE TABLE IF NOT EXISTS derivatives_quotes (
+                symbol   VARCHAR(20)  NOT NULL,
+                date     DATE         NOT NULL,
+                open     NUMERIC(12,2),
+                high     NUMERIC(12,2),
+                low      NUMERIC(12,2),
+                close    NUMERIC(12,2),
+                volume   BIGINT,
+                PRIMARY KEY (symbol, date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_deriv_quotes_date ON derivatives_quotes (date DESC);
+            CREATE TABLE IF NOT EXISTS derivatives_oi (
+                symbol        VARCHAR(20) NOT NULL,
+                date          DATE        NOT NULL,
+                open_interest BIGINT,
+                oi_change     BIGINT,
+                PRIMARY KEY (symbol, date)
+            );
+            CREATE TABLE IF NOT EXISTS derivatives_basis (
+                date           DATE          PRIMARY KEY,
+                f1m_close      NUMERIC(12,2),
+                f2m_close      NUMERIC(12,2),
+                vn30_close     NUMERIC(12,2),
+                basis          NUMERIC(12,2),
+                basis_pct      NUMERIC(8,4),
+                spread_f1m_f2m NUMERIC(12,2),
+                regime         VARCHAR(10),
+                updated_at     TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_deriv_basis_date ON derivatives_basis (date DESC);
+            INSERT INTO symbols (symbol, name, exchange, industry)
+            VALUES ('VN30F1M', 'VN30 Index Futures (front month)', 'DERIV', 'Derivatives')
+            ON CONFLICT (symbol) DO NOTHING;
+        """
+        with self._cursor() as cur:
+            cur.execute(sql)
+
+    def upsert_derivatives_quotes(self, symbol: str, quotes: list[DailyQuote]) -> int:
+        sql = """
+            INSERT INTO derivatives_quotes (symbol, date, open, high, low, close, volume)
+            VALUES %s
+            ON CONFLICT (symbol, date) DO UPDATE SET
+                open   = EXCLUDED.open,
+                high   = EXCLUDED.high,
+                low    = EXCLUDED.low,
+                close  = EXCLUDED.close,
+                volume = EXCLUDED.volume
+        """
+        by_date: dict = {}
+        for q in quotes:
+            d = _parse_date(q.date)
+            if d and (q.open or q.close):
+                by_date[d] = (symbol, d, q.open, q.high, q.low, q.close, q.volume)
+        rows = list(by_date.values())
+        if not rows:
+            return 0
+        with self._cursor() as cur:
+            psycopg2.extras.execute_values(cur, sql, rows)
+        return len(rows)
+
+    def get_derivatives_quotes(self, symbol: str, days: int = 300) -> list[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT date, open, high, low, close, volume
+                FROM derivatives_quotes
+                WHERE symbol = %s
+                ORDER BY date DESC
+                LIMIT %s
+                """,
+                (symbol.upper(), days),
+            )
+            rows = cur.fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def upsert_derivatives_oi(self, symbol: str, oi_rows: list[dict]) -> int:
+        sql = """
+            INSERT INTO derivatives_oi (symbol, date, open_interest, oi_change)
+            VALUES %s
+            ON CONFLICT (symbol, date) DO UPDATE SET
+                open_interest = EXCLUDED.open_interest,
+                oi_change     = EXCLUDED.oi_change
+        """
+        rows = []
+        for r in oi_rows:
+            d = _parse_date(str(r.get("date", "")))
+            if d:
+                rows.append((symbol, d, r.get("open_interest"), r.get("oi_change")))
+        if not rows:
+            return 0
+        with self._cursor() as cur:
+            psycopg2.extras.execute_values(cur, sql, rows)
+        return len(rows)
+
+    def get_derivatives_oi(self, symbol: str, days: int = 300) -> list[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT date, open_interest, oi_change
+                FROM derivatives_oi
+                WHERE symbol = %s
+                ORDER BY date DESC
+                LIMIT %s
+                """,
+                (symbol.upper(), days),
+            )
+            rows = cur.fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def upsert_basis(self, rows: list[dict]) -> int:
+        sql = """
+            INSERT INTO derivatives_basis
+                (date, f1m_close, f2m_close, vn30_close, basis, basis_pct,
+                 spread_f1m_f2m, regime)
+            VALUES %s
+            ON CONFLICT (date) DO UPDATE SET
+                f1m_close      = EXCLUDED.f1m_close,
+                f2m_close      = EXCLUDED.f2m_close,
+                vn30_close     = EXCLUDED.vn30_close,
+                basis          = EXCLUDED.basis,
+                basis_pct      = EXCLUDED.basis_pct,
+                spread_f1m_f2m = EXCLUDED.spread_f1m_f2m,
+                regime         = EXCLUDED.regime,
+                updated_at     = NOW()
+        """
+        out = []
+        for r in rows:
+            d = _parse_date(str(r.get("date", "")))
+            if d:
+                out.append((d, r.get("f1m_close"), r.get("f2m_close"), r.get("vn30_close"),
+                            r.get("basis"), r.get("basis_pct"),
+                            r.get("spread_f1m_f2m"), r.get("regime")))
+        if not out:
+            return 0
+        with self._cursor() as cur:
+            psycopg2.extras.execute_values(cur, sql, out)
+        return len(out)
+
+    def get_basis(self, days: int = 90) -> list[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT date, f1m_close, f2m_close, vn30_close, basis, basis_pct,
+                       spread_f1m_f2m, regime
+                FROM derivatives_basis
+                ORDER BY date DESC
+                LIMIT %s
+                """,
+                (days,),
+            )
+            rows = cur.fetchall()
+        return [dict(r) for r in reversed(rows)]
+
     # ── Portfolio backtests ───────────────────────────────────────────────────
 
     def save_portfolio_backtest(self, label: str, result: dict) -> int:
@@ -657,6 +816,393 @@ class Store:
         d = dict(row)
         d["created_at"] = d["created_at"].isoformat() if d["created_at"] else None
         return d
+
+    # ── Wyckoff-Optimized: regime, backtests, optimized params ────────────────
+
+    def ensure_wyckoff_opt_tables(self):
+        """Idempotent — create regime/backtest/optimized-params tables and the
+        symbols.is_vn100 flag so existing deployments pick them up without a
+        fresh init.sql. Mirrors db/init.sql."""
+        sql = """
+            ALTER TABLE symbols ADD COLUMN IF NOT EXISTS is_vn100 BOOLEAN DEFAULT FALSE;
+
+            CREATE TABLE IF NOT EXISTS regime_history (
+                date          DATE         PRIMARY KEY,
+                regime        VARCHAR(12)  NOT NULL,
+                vnindex       NUMERIC(12,2),
+                ma20          NUMERIC(12,2),
+                ma50          NUMERIC(12,2),
+                ma200         NUMERIC(12,2),
+                macd_hist     NUMERIC(12,4),
+                drawdown      NUMERIC(6,4),
+                wyckoff_phase VARCHAR(20),
+                updated_at    TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_regime_date ON regime_history (date DESC);
+
+            CREATE TABLE IF NOT EXISTS backtest_runs (
+                id            SERIAL PRIMARY KEY,
+                run_at        TIMESTAMPTZ DEFAULT NOW(),
+                capital       NUMERIC(18,2),
+                train_start   DATE,
+                train_end     DATE,
+                test_start    DATE,
+                test_end      DATE,
+                params        JSONB,
+                regime_scope  VARCHAR(12),
+                annual_return NUMERIC(10,4),
+                total_return  NUMERIC(10,4),
+                sharpe_ratio  NUMERIC(8,3),
+                max_drawdown  NUMERIC(6,4),
+                win_rate      NUMERIC(6,4),
+                total_trades  INTEGER,
+                avg_hold_days NUMERIC(8,1),
+                by_year       JSONB,
+                indicator_ic  JSONB,
+                notes         TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS backtest_trades (
+                id              SERIAL PRIMARY KEY,
+                run_id          INTEGER REFERENCES backtest_runs(id) ON DELETE CASCADE,
+                symbol          VARCHAR(20),
+                entry_date      DATE,
+                entry_price     NUMERIC(14,2),
+                exit_date       DATE,
+                exit_price      NUMERIC(14,2),
+                shares          INTEGER,
+                pnl             NUMERIC(16,2),
+                pnl_pct         NUMERIC(10,4),
+                hold_days       INTEGER,
+                exit_type       VARCHAR(20),
+                regime_at_entry VARCHAR(12),
+                wyckoff_phase   VARCHAR(30),
+                sector          VARCHAR(80),
+                ecosystem       VARCHAR(30)
+            );
+            CREATE INDEX IF NOT EXISTS idx_bt_trades_run    ON backtest_trades (run_id);
+            CREATE INDEX IF NOT EXISTS idx_bt_trades_symbol ON backtest_trades (symbol);
+            CREATE INDEX IF NOT EXISTS idx_bt_trades_exit   ON backtest_trades (exit_type);
+
+            CREATE TABLE IF NOT EXISTS optimized_params (
+                regime     VARCHAR(12) PRIMARY KEY,
+                params     JSONB       NOT NULL,
+                run_id     INTEGER REFERENCES backtest_runs(id),
+                sharpe     NUMERIC(8,3),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """
+        with self._cursor() as cur:
+            cur.execute(sql)
+
+    def upsert_regime(self, day, regime_row: dict) -> None:
+        sql = """
+            INSERT INTO regime_history
+                (date, regime, vnindex, ma20, ma50, ma200, macd_hist, drawdown, wyckoff_phase)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (date) DO UPDATE SET
+                regime=EXCLUDED.regime, vnindex=EXCLUDED.vnindex,
+                ma20=EXCLUDED.ma20, ma50=EXCLUDED.ma50, ma200=EXCLUDED.ma200,
+                macd_hist=EXCLUDED.macd_hist, drawdown=EXCLUDED.drawdown,
+                wyckoff_phase=EXCLUDED.wyckoff_phase, updated_at=NOW()
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (
+                day, regime_row.get("regime"), regime_row.get("vnindex"),
+                regime_row.get("ma20"), regime_row.get("ma50"), regime_row.get("ma200"),
+                regime_row.get("macd_hist"), regime_row.get("drawdown"),
+                regime_row.get("wyckoff_phase"),
+            ))
+
+    def get_regime(self, day=None) -> Optional[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            if day:
+                cur.execute("SELECT * FROM regime_history WHERE date = %s", (day,))
+            else:
+                cur.execute("SELECT * FROM regime_history ORDER BY date DESC LIMIT 1")
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_regime_history(self, days: int = 365) -> list[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM regime_history ORDER BY date DESC LIMIT %s", (days,))
+            rows = cur.fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def get_vn100_symbols(self) -> list[str]:
+        """Marked VN100 symbols; falls back to the static list (sector_rotation)
+        when none are flagged yet, so the backtest runs out of the box."""
+        with self._read() as cur:
+            try:
+                cur.execute("SELECT symbol FROM symbols WHERE is_vn100 = true ORDER BY symbol")
+                rows = [r[0] for r in cur.fetchall()]
+            except psycopg2.Error:
+                rows = []
+        if rows:
+            return rows
+        import sector_rotation
+        return list(sector_rotation.VN100)
+
+    def mark_vn100(self, symbols: list[str]) -> int:
+        with self._cursor() as cur:
+            cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS is_vn100 BOOLEAN DEFAULT FALSE")
+            cur.execute("UPDATE symbols SET is_vn100 = false")
+            cur.execute("UPDATE symbols SET is_vn100 = true WHERE symbol = ANY(%s)", (symbols,))
+            return cur.rowcount
+
+    def get_all_symbols_with_sectors(self) -> dict:
+        """{symbol: industry} for VN100 symbols (or all when none marked)."""
+        with self._read() as cur:
+            cur.execute(
+                """SELECT symbol, COALESCE(industry, '') FROM symbols
+                   WHERE is_vn100 = true OR is_vn100 IS NULL"""
+            )
+            rows = cur.fetchall()
+        out = {r[0]: r[1] for r in rows if r[1]}
+        if out:
+            return out
+        with self._read() as cur:
+            cur.execute("SELECT symbol, COALESCE(industry, '') FROM symbols")
+            return {r[0]: r[1] for r in cur.fetchall() if r[1]}
+
+    def save_backtest_run(self, result: dict) -> int:
+        sql = """
+            INSERT INTO backtest_runs
+                (capital, train_start, train_end, test_start, test_end, params,
+                 regime_scope, annual_return, total_return, sharpe_ratio,
+                 max_drawdown, win_rate, total_trades, avg_hold_days,
+                 by_year, indicator_ic, notes)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (
+                result.get("capital"), result.get("train_start"), result.get("train_end"),
+                result.get("test_start"), result.get("test_end"),
+                Json(result.get("params", {})), result.get("regime_scope", "ALL"),
+                result.get("annual_return"), result.get("total_return"),
+                result.get("sharpe_ratio"), result.get("max_drawdown"),
+                result.get("win_rate"), result.get("total_trades"),
+                result.get("avg_hold_days"), Json(result.get("by_year", {})),
+                Json(result.get("indicator_ic", {})), result.get("notes"),
+            ))
+            return cur.fetchone()[0]
+
+    def save_backtest_trades(self, run_id: int, trades: list[dict]) -> int:
+        sql = """
+            INSERT INTO backtest_trades
+                (run_id, symbol, entry_date, entry_price, exit_date, exit_price,
+                 shares, pnl, pnl_pct, hold_days, exit_type, regime_at_entry,
+                 wyckoff_phase, sector, ecosystem)
+            VALUES %s
+        """
+        rows = [(
+            run_id, t.get("symbol"), t.get("entry_date"), t.get("entry_price"),
+            t.get("exit_date"), t.get("exit_price"), t.get("shares"), t.get("pnl"),
+            t.get("pnl_pct"), t.get("hold_days"), t.get("exit_type"),
+            t.get("regime_at_entry"), t.get("wyckoff_phase"), t.get("sector"),
+            t.get("ecosystem"),
+        ) for t in trades]
+        if not rows:
+            return 0
+        with self._cursor() as cur:
+            psycopg2.extras.execute_values(cur, sql, rows)
+        return len(rows)
+
+    def get_backtest_runs(self, limit: int = 20) -> list[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM backtest_runs ORDER BY run_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["run_at"] = d["run_at"].isoformat() if d.get("run_at") else None
+            for k in ("train_start", "train_end", "test_start", "test_end"):
+                if d.get(k):
+                    d[k] = str(d[k])
+            out.append(d)
+        return out
+
+    def get_backtest_trades(self, run_id: int) -> list[dict]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM backtest_trades WHERE run_id = %s ORDER BY entry_date", (run_id,))
+            rows = cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("entry_date", "exit_date"):
+                if d.get(k):
+                    d[k] = str(d[k])
+            out.append(d)
+        return out
+
+    def save_optimized_params(self, regime: str, params: dict,
+                              run_id: Optional[int] = None, sharpe: float = 0.0) -> None:
+        sql = """
+            INSERT INTO optimized_params (regime, params, run_id, sharpe)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (regime) DO UPDATE SET
+                params=EXCLUDED.params, run_id=EXCLUDED.run_id,
+                sharpe=EXCLUDED.sharpe, updated_at=NOW()
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (regime, Json(params), run_id, sharpe))
+
+    def save_optimized_params_all(self, per_regime: dict) -> None:
+        """Bulk-save the per-regime optimizer output {regime: {params, sharpe, run_id}}."""
+        for regime, info in per_regime.items():
+            if isinstance(info, dict) and "params" in info:
+                self.save_optimized_params(regime, info["params"],
+                                           info.get("run_id"), info.get("sharpe", 0.0))
+            else:  # info is a bare params dict
+                self.save_optimized_params(regime, info)
+
+    def get_optimized_params(self, regime: Optional[str] = None):
+        """For a regime → its params dict (DEFAULT_PARAMS when unset).
+        Without a regime → {regime: params} for every stored regime."""
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            if regime:
+                cur.execute("SELECT params FROM optimized_params WHERE regime = %s", (regime,))
+                row = cur.fetchone()
+                if row:
+                    return row["params"]
+                import wyckoff_opt
+                return dict(wyckoff_opt.DEFAULT_PARAMS)
+            cur.execute("SELECT regime, params, sharpe, updated_at FROM optimized_params")
+            rows = cur.fetchall()
+        out = {}
+        for r in rows:
+            out[r["regime"]] = {
+                "params": r["params"], "sharpe": float(r["sharpe"]) if r["sharpe"] is not None else None,
+                "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+            }
+        return out
+
+    def clean_backtest_runs(self) -> int:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM backtest_trades")
+            cur.execute("DELETE FROM backtest_runs")
+            return cur.rowcount
+
+    # ── Mutual funds & holdings (fmarket) ─────────────────────────────────────
+
+    def ensure_funds_tables(self):
+        """Idempotent — lets existing deployments pick up the tables without a migration."""
+        sql = """
+            CREATE TABLE IF NOT EXISTS funds (
+                fund_id          INTEGER      PRIMARY KEY,
+                short_name       VARCHAR(40)  NOT NULL,
+                name             TEXT         NOT NULL,
+                owner_name       TEXT,
+                fund_type        VARCHAR(60),
+                nav              NUMERIC(16,2),
+                nav_update_at    DATE,
+                return_1m        NUMERIC(8,2),
+                return_3m        NUMERIC(8,2),
+                return_6m        NUMERIC(8,2),
+                return_12m       NUMERIC(8,2),
+                return_36m       NUMERIC(8,2),
+                return_inception NUMERIC(8,2),
+                updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            );
+            CREATE TABLE IF NOT EXISTS fund_holdings (
+                id                BIGSERIAL    PRIMARY KEY,
+                fund_id           INTEGER      NOT NULL REFERENCES funds(fund_id) ON DELETE CASCADE,
+                stock_code        VARCHAR(20)  NOT NULL,
+                industry          VARCHAR(120),
+                net_asset_percent NUMERIC(8,2) NOT NULL DEFAULT 0,
+                price             NUMERIC(16,2),
+                update_at         DATE
+            );
+            CREATE INDEX IF NOT EXISTS idx_fund_holdings_fund  ON fund_holdings (fund_id);
+            CREATE INDEX IF NOT EXISTS idx_fund_holdings_stock ON fund_holdings (stock_code);
+        """
+        with self._cursor() as cur:
+            cur.execute(sql)
+
+    def replace_funds(
+        self,
+        funds:            list[FundInfo],
+        holdings_by_fund: dict[int, list[FundHolding]],
+    ) -> tuple[int, int]:
+        """Wholesale-replace funds + holdings in one transaction.
+
+        Both tables are emptied then re-inserted, so any fund that left the
+        equity-fund list — or any stock a fund no longer holds — disappears.
+        Returns (fund_count, holding_count).
+        """
+        frows = [(
+            f.fund_id, f.short_name, f.name, f.owner_name, f.fund_type, f.nav,
+            f.nav_update_at, f.return_1m, f.return_3m, f.return_6m,
+            f.return_12m, f.return_36m, f.return_inception,
+        ) for f in funds]
+
+        hrows = [
+            (fid, h.stock_code, h.industry, h.net_asset_percent, h.price, h.update_at)
+            for fid, hs in holdings_by_fund.items() for h in hs
+        ]
+
+        with self._cursor() as cur:
+            # TRUNCATE both together so the FK ordering doesn't matter.
+            cur.execute("TRUNCATE fund_holdings, funds RESTART IDENTITY CASCADE")
+            if frows:
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO funds (
+                        fund_id, short_name, name, owner_name, fund_type, nav,
+                        nav_update_at, return_1m, return_3m, return_6m,
+                        return_12m, return_36m, return_inception)
+                    VALUES %s
+                """, frows)
+            if hrows:
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO fund_holdings (
+                        fund_id, stock_code, industry, net_asset_percent, price, update_at)
+                    VALUES %s
+                """, hrows)
+        return len(frows), len(hrows)
+
+    def get_funds_with_holdings(self) -> dict:
+        """All funds, each with its holdings array (joined to symbol names)."""
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT *, EXTRACT(EPOCH FROM updated_at) AS updated_epoch
+                FROM funds
+                ORDER BY return_12m DESC NULLS LAST, short_name
+            """)
+            funds = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT fh.fund_id, fh.stock_code, fh.industry,
+                       fh.net_asset_percent, fh.price, fh.update_at,
+                       s.name AS company_name, s.exchange
+                FROM fund_holdings fh
+                LEFT JOIN symbols s ON s.symbol = fh.stock_code
+                ORDER BY fh.net_asset_percent DESC
+            """)
+            holdings = [dict(r) for r in cur.fetchall()]
+
+        by_fund: dict[int, list[dict]] = {}
+        for h in holdings:
+            fid = h.pop("fund_id")
+            h["update_at"] = h["update_at"].isoformat() if h.get("update_at") else None
+            by_fund.setdefault(fid, []).append(h)
+
+        updated_at = None
+        for f in funds:
+            f["holdings"]   = by_fund.get(f["fund_id"], [])
+            f["nav_update_at"] = f["nav_update_at"].isoformat() if f.get("nav_update_at") else None
+            ts = f.pop("updated_at", None)
+            f.pop("updated_epoch", None)
+            if ts and (updated_at is None or ts > updated_at):
+                updated_at = ts
+
+        return {
+            "funds":      funds,
+            "count":      len(funds),
+            "updated_at": updated_at.isoformat() if updated_at else None,
+        }
 
     # ── Quarterly report analyses ─────────────────────────────────────────────
 

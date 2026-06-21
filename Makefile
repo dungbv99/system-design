@@ -2,6 +2,7 @@
         build-live run-live stop-live clean-live logs-live \
         build-jobs run-jobs stop-jobs clean-jobs logs-jobs \
         build-stock run-stock stop-stock clean-stock logs-stock crawl-now \
+        mark-vn100 backtest backtest-quick optimize live-scan full-pipeline clean-backtest backtest-progress \
         build-java build-go deps test test-java test-go \
         new-go-service
 
@@ -88,6 +89,59 @@ crawl-now:
 # Run the React dev server (proxies /api to localhost:8090)
 dev-frontend-stock:
 	cd stock-analytics/frontend && npm install && npm run dev
+
+# ── Wyckoff-Optimized pipeline (README_WYCKOFF_OPTIMIZED.md §18) ──────────
+# All targets exec inside the running crawler container (run `make run-stock`
+# first). Results land in stock-analytics/output/. CAPITAL is in VND.
+CRAWLER_CONTAINER := stock-analytics-crawler-1
+CAPITAL           ?= 1000000000
+
+# Mark the VN100 basket in the DB (idempotent; falls back to the static list).
+mark-vn100:
+	docker exec $(CRAWLER_CONTAINER) python3 -c \
+	  "from store import Store; import os, sector_rotation as sr; \
+	   print('marked', Store(os.environ['DB_DSN']).mark_vn100(sr.VN100), 'VN100 symbols')"
+
+# Full walk-forward backtest (2014-2025) — 1000 samples, ~2-6h.
+backtest:
+	@bash stock-analytics/scripts/run_backtest.sh $(CAPITAL) 1000
+
+# Quick backtest — 100 samples, ~30-60 min.
+backtest-quick:
+	@bash stock-analytics/scripts/run_backtest.sh $(CAPITAL) 100
+
+# Optimize per regime and save params (assumes data already loaded).
+optimize:
+	docker exec $(CRAWLER_CONTAINER) python3 -c \
+	  "import os, opt_backtest; from store import Store; \
+	   opt_backtest.optimize_and_save(Store(os.environ['DB_DSN']), $(CAPITAL))"
+
+# Live signal scan for today using the current regime's optimized params.
+live-scan:
+	docker exec $(CRAWLER_CONTAINER) python3 -c \
+	  "import os; from store import Store; from main import run_live_wyckoff_opt; \
+	   run_live_wyckoff_opt(Store(os.environ['DB_DSN']))"
+
+# Backtest + write result files to output/ (and Claude analysis if API key set).
+full-pipeline:
+	@$(MAKE) backtest CAPITAL=$(CAPITAL)
+	@bash stock-analytics/scripts/after_backtest.sh
+	@echo "" && echo "DONE — results in stock-analytics/output/" && ls -lh stock-analytics/output/
+
+clean-backtest:
+	docker exec $(CRAWLER_CONTAINER) python3 -c \
+	  "import os; from store import Store; \
+	   Store(os.environ['DB_DSN']).clean_backtest_runs(); print('cleaned')"
+
+# Print live backtest progress as X/100% (poll this while a backtest runs).
+backtest-progress:
+	@curl -s http://localhost:8090/api/backtest/progress | python3 -c \
+	  "import sys,json; d=json.load(sys.stdin); \
+	   eta=d.get('eta_sec'); \
+	   print(f\"{d.get('overall_pct',0):.1f}/100%  [{d.get('phase') or '-'}] \" \
+	         f\"{d.get('phase_current',0)}/{d.get('phase_total',0)}  \" \
+	         f\"elapsed={d.get('elapsed_sec',0)}s\" + (f' eta~{eta}s' if eta else '') + \
+	         ('' if d.get('active') or d.get('running') else '  (idle)'))"
 
 # ── Frontend (dev only) ───────────────────────────────────────────────────
 

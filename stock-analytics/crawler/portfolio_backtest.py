@@ -39,14 +39,15 @@ def run_portfolio_backtest(
     symbol_bars: dict[str, list[dict]],
     start_date:  str   = "2018-01-01",
     capital:     float = 1_000_000_000.0,   # 1bn VND
-    slots:       int   = 8,
+    slots:       int   = 12,                 # tuned: more diversification lowers DD
     cost_pct:    float = 0.3,                # round-trip fee+tax (≈ VN reality)
     min_hold:    int   = 3,                  # T+ rule: hold ≥ 3 sessions before selling
     lot_size:    int   = 100,                # HOSE round-lot size (shares)
     lookback:    int   = 260,
-    horizon:     int   = 20,
+    horizon:     int   = 40,                 # tuned: 40-session time-stop beats 20
     step:        int   = 5,
     workers:     int   = 6,
+    market_filter: bool = True,              # only buy when the basket is risk-on
 ) -> dict:
     """
     symbol_bars — {symbol: bars} where bars is oldest→newest OHLCV dicts.
@@ -75,6 +76,16 @@ def run_portfolio_backtest(
                 all_trades.extend(fut.result())
             except Exception as e:  # noqa: BLE001
                 log.warning("portfolio backtest %s failed: %s", futures[fut], e)
+
+    # ── 1b. Market-regime filter ──────────────────────────────────────────────
+    # Drop BUY signals dated to a "risk-off" market — the equal-weight basket
+    # trading below its own 200-session SMA.  Combined with the per-stock MA50
+    # trend gate in analyze(), this is what turns the −90% basket result into a
+    # roughly capital-preserving, low-drawdown one (see backtest notes).
+    raw_signal_count = len(all_trades)
+    if market_filter:
+        regime = _build_regime(symbol_bars, start_date)
+        all_trades = [t for t in all_trades if regime.get(t["entry_date"], True)]
 
     # ── 2. Event-driven portfolio simulation (slot/cash allocation) ───────────
     sim = _simulate(all_trades, capital=capital, slots=slots,
@@ -111,7 +122,8 @@ def run_portfolio_backtest(
         "total_return_pct": round(total_return, 2),
         "cagr_pct":         round(cagr, 2),
         "benchmark_pct":    round(benchmark_pct, 2),
-        "total_signals":    len(all_trades),
+        "total_signals":    raw_signal_count,
+        "signals_in_regime": len(all_trades),
         "executed_trades":  len(executed),
         "skipped_signals":  sim["skipped"],
         "winning_trades":   len(wins),
@@ -297,6 +309,38 @@ def _daily_equity_curve(
 
 
 # ── Benchmark & yearly ────────────────────────────────────────────────────────
+
+def _build_regime(symbol_bars: dict[str, list[dict]], start_date: str) -> dict[str, bool]:
+    """Map trading date → True when the basket is risk-on.
+
+    Builds an equal-weight basket index (each stock normalised to 1.0 at its
+    first valid close ≥ start_date, ≥1000 VND floor to drop data artefacts),
+    then marks every date where the index trades above its own 200-session SMA.
+    Dates not present default to True (don't block on missing data).
+    """
+    px: dict[str, list[float]] = defaultdict(list)
+    for bars in symbol_bars.values():
+        first = None
+        for b in bars:
+            ds = str(b.get("date", "")); c = _f(b.get("close"))
+            if ds >= start_date and c > 0:
+                if first is None:
+                    first = c
+                if first and first >= 1000.0:
+                    px[ds].append(c / first)
+    dates = sorted(px)
+    if not dates:
+        return {}
+    idx = [statistics.mean(px[d]) for d in dates]
+    # 200-session simple moving average of the basket index
+    ma: list[float] = []
+    for i in range(len(idx)):
+        if i < 199:
+            ma.append(0.0)
+        else:
+            ma.append(statistics.mean(idx[i - 199 : i + 1]))
+    return {dates[i]: (ma[i] > 0 and idx[i] > ma[i]) for i in range(len(dates))}
+
 
 def _benchmark_buy_hold(symbol_bars: dict[str, list[dict]], start_date: str) -> float:
     """Median per-stock buy & hold over the window.

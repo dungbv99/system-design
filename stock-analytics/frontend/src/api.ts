@@ -1,4 +1,4 @@
-import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, MultifactorSignal, MultifactorPage, Prediction, PredictionPage, PortfolioPage, PortfolioBacktest, ReportAnalysis } from './types'
+import type { Stats, CrawlStatus, CrawlRun, SymbolsPage, Quote, WyckoffSignal, WyckoffPage, MultifactorSignal, MultifactorPage, Prediction, PredictionPage, PortfolioPage, PortfolioBacktest, ReportAnalysis, FundsPage, BasisRow, DerivativesOi, DerivativesSummary, IntradayBar } from './types'
 
 // ── VN Index constituents (approximate – HOSE rebalances quarterly) ──────────
 // symbols  → small/fixed indices: load by exact symbol list
@@ -322,6 +322,100 @@ export const api = {
       }
       return r.json()
     }),
+  // ── Derivatives (VN30F1M / VN30F2M / VN30 index) ─────────────────────────
+  derivativesSummary: (): Promise<DerivativesSummary> =>
+    fetch('/api/derivatives/summary').then(r => r.json()),
+  derivativesQuotes: (symbol: string, days = 120): Promise<Quote[]> =>
+    fetch(`/api/derivatives/quotes/${encodeURIComponent(symbol)}?days=${days}`).then(r => r.json()),
+  basis: (days = 90): Promise<BasisRow[]> =>
+    fetch(`/api/derivatives/basis?days=${days}`).then(r => r.json()),
+  derivativesOi: (symbol: string, days = 90): Promise<DerivativesOi[]> =>
+    fetch(`/api/derivatives/oi/${encodeURIComponent(symbol)}?days=${days}`).then(r => r.json()),
+  derivativesIntraday: (symbol: string, tf = '5', days = 10): Promise<IntradayBar[]> =>
+    fetch(`/api/derivatives/intraday/${encodeURIComponent(symbol)}?tf=${tf}&days=${days}`).then(r => r.json()),
+  computeDerivatives: (): Promise<{ message: string }> =>
+    fetch('/api/derivatives/compute', { method: 'POST' }).then(async r => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error((b as { detail?: string }).detail ?? r.statusText)
+      }
+      return r.json()
+    }),
+  // ── Mutual funds (fmarket equity funds & holdings) ───────────────────────
+  funds: (): Promise<FundsPage> =>
+    fetch('/api/funds').then(r => r.json()),
+  refreshFunds: (): Promise<{ message: string }> =>
+    fetch('/api/funds/refresh', { method: 'POST' }).then(async r => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error((b as { detail?: string }).detail ?? r.statusText)
+      }
+      return r.json()
+    }),
+  // ── Wyckoff-Optimized (regime + walk-forward backtest) ───────────────────
+  regimeLatest: (): Promise<RegimeRow> =>
+    fetch('/api/regime/latest').then(r => r.json()),
+  regimeHistory: (days = 365): Promise<RegimeRow[]> =>
+    fetch(`/api/regime/history?days=${days}`).then(r => r.json()),
+  backtestRuns: (limit = 20): Promise<BacktestRun[]> =>
+    fetch(`/api/backtest/runs?limit=${limit}`).then(r => r.json()),
+  backtestTrades: (runId: number): Promise<BacktestTradeRow[]> =>
+    fetch(`/api/backtest/trades/${runId}`).then(r => r.json()),
+  backtestParams: (): Promise<Record<string, { params: Record<string, number>; sharpe: number | null }>> =>
+    fetch('/api/backtest/params').then(r => r.json()),
+  backtestProgress: (): Promise<BacktestProgress> =>
+    fetch('/api/backtest/progress').then(r => r.json()),
+  runBacktest: (capital: number, samples = 200): Promise<{ status: string; message: string }> =>
+    fetch(`/api/backtest/run?capital=${capital}&samples=${samples}`, { method: 'POST' }).then(async r => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error((b as { detail?: string }).detail ?? r.statusText)
+      }
+      return r.json()
+    }),
+  wyckoffOpt: (symbol: string): Promise<WyckoffOptSignal> =>
+    fetch(`/api/wyckoff-opt/${encodeURIComponent(symbol)}`).then(async r => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}))
+        throw new Error((b as { detail?: string }).detail ?? r.statusText)
+      }
+      return r.json()
+    }),
+}
+
+// ── Wyckoff-Optimized response shapes ───────────────────────────────────────
+
+export interface RegimeRow {
+  date?: string; regime: string; vnindex?: number | null
+  ma20?: number | null; ma50?: number | null; ma200?: number | null
+  macd_hist?: number | null; drawdown?: number | null; wyckoff_phase?: string | null
+}
+export interface BacktestProgress {
+  active: boolean; running?: boolean; phase: string | null; message?: string
+  phase_current?: number; phase_total?: number; overall_pct: number
+  elapsed_sec?: number; eta_sec?: number | null
+}
+export interface BacktestRun {
+  id: number; run_at: string | null; capital: number | null
+  train_start?: string; train_end?: string; test_start?: string; test_end?: string
+  regime_scope?: string; annual_return: number | null; total_return: number | null
+  sharpe_ratio: number | null; max_drawdown: number | null; win_rate: number | null
+  total_trades: number | null; avg_hold_days: number | null
+  by_year?: Record<string, number>; indicator_ic?: Record<string, number>; notes?: string
+}
+export interface BacktestTradeRow {
+  id: number; symbol: string; entry_date: string; entry_price: number
+  exit_date: string | null; exit_price: number | null; shares: number
+  pnl: number; pnl_pct: number; hold_days: number | null; exit_type: string
+  regime_at_entry: string; wyckoff_phase: string; sector: string; ecosystem: string | null
+}
+export interface WyckoffOptSignal {
+  symbol: string; signal: string; score: number; phase: string; sub_phase: string
+  current_price: number | null; entry_price: number | null; stop_loss: number | null
+  rsi: number | null; macd_hist: number | null; bb_width: number | null
+  force_index: number | null; cmf: number | null; vroc: number | null
+  stoch_rsi: number | null; rs: number | null; atr: number | null
+  regime: string | null; indicators: Record<string, number | null>; reasons: string[]
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────

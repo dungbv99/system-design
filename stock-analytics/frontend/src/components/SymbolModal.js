@@ -134,6 +134,118 @@ function XGBPanel({ symbol }) {
                     : `Confidence below 55% threshold (${pct}%). ${symbol} does not show a sufficient momentum pattern. ` +
                         `Wait for a higher-probability setup or check Wyckoff for context.` }), _jsxs("div", { className: "text-[10px] text-[#8b949e]/40 text-right", children: ["Predicted ", data.predicted_at, " \u00B7 XGBoost classifier \u00B7 T+2.5 settlement \u00B7 not financial advice"] })] }));
 }
+// ── Quarterly report panel (Vietstock BCTC → Gemini) ─────────────────────────
+/** Inline **bold** segments. */
+function mdBold(text, keyBase) {
+    return text.split(/\*\*(.+?)\*\*/g).map((part, i) => i % 2 === 1
+        ? _jsx("strong", { className: "text-[#e6edf3] font-semibold", children: part }, `${keyBase}-${i}`)
+        : part);
+}
+/** Tiny markdown renderer: ## headings, "- " bullets, **bold**, _italic line_, paragraphs. */
+function MdLite({ text }) {
+    const out = [];
+    let bullets = [];
+    let key = 0;
+    const flushBullets = () => {
+        if (!bullets.length)
+            return;
+        out.push(_jsx("ul", { className: "list-disc pl-5 space-y-1 mb-3", children: bullets.map((b, i) => _jsx("li", { className: "leading-relaxed", children: mdBold(b, `b${key}-${i}`) }, i)) }, `ul${key++}`));
+        bullets = [];
+    };
+    for (const raw of text.split('\n')) {
+        const line = raw.trimEnd();
+        const t = line.trim();
+        if (!t) {
+            flushBullets();
+            continue;
+        }
+        if (/^#{1,4}\s/.test(t)) {
+            flushBullets();
+            out.push(_jsx("div", { className: "text-[#58a6ff] font-bold text-sm mt-4 mb-2", children: mdBold(t.replace(/^#{1,4}\s*/, ''), `h${key}`) }, `h${key++}`));
+        }
+        else if (/^[-*]\s+/.test(t)) {
+            bullets.push(t.replace(/^[-*]\s+/, ''));
+        }
+        else if (/^_.*_$/.test(t)) {
+            flushBullets();
+            out.push(_jsx("div", { className: "italic text-[#8b949e]/70 text-[11px] mt-3", children: t.replace(/^_|_$/g, '') }, `i${key++}`));
+        }
+        else {
+            flushBullets();
+            out.push(_jsx("p", { className: "mb-2 leading-relaxed", children: mdBold(t, `p${key}`) }, `p${key++}`));
+        }
+    }
+    flushBullets();
+    return _jsx("div", { className: "text-xs text-[#c9d1d9]", children: out });
+}
+const PROVIDERS = [
+    { id: 'gemini', label: '✨ Gemini' },
+    { id: 'claude', label: '🤖 Claude' },
+];
+function ReportPanel({ symbol }) {
+    const [provider, setProvider] = useState('gemini');
+    const [data, setData] = useState(null);
+    const [starting, setStarting] = useState(false);
+    const [errMsg, setErrMsg] = useState(null);
+    const pollRef = useRef(null);
+    const load = useCallback(() => {
+        api.reportAnalysis(symbol, provider)
+            .then(setData)
+            .catch(() => setErrMsg('Không gọi được API — kiểm tra crawler logs.'));
+    }, [symbol, provider]);
+    useEffect(() => {
+        setData(null);
+        setErrMsg(null);
+        load();
+        return () => { if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+        } };
+    }, [load]);
+    // Poll while the backend job runs (crawl + LLM ≈ 30–120s)
+    useEffect(() => {
+        if (data?.status === 'running' && !pollRef.current) {
+            pollRef.current = setInterval(load, 5000);
+        }
+        if (data?.status !== 'running' && pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+        }
+    }, [data, load]);
+    const start = async () => {
+        setStarting(true);
+        setErrMsg(null);
+        try {
+            await api.computeReportAnalysis(symbol, provider);
+            setData({ status: 'running' });
+        }
+        catch (e) {
+            setErrMsg(e instanceof Error ? e.message : 'Không khởi động được phân tích');
+        }
+        finally {
+            setStarting(false);
+        }
+    };
+    const providerLabel = provider === 'claude' ? 'Claude' : 'Gemini';
+    const providerTabs = (_jsx("div", { className: "flex gap-1", children: PROVIDERS.map(p => (_jsx("button", { onClick: () => setProvider(p.id), className: `px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
+            ${provider === p.id
+                ? 'bg-[#21262d] border-[#58a6ff] text-[#58a6ff]'
+                : 'border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`, children: p.label }, p.id))) }));
+    const startButton = (label) => (_jsx("button", { onClick: start, disabled: starting || data?.status === 'running', className: "px-4 py-2 bg-[#58a6ff] hover:bg-[#79b8ff] disabled:opacity-50 disabled:cursor-not-allowed\n                 text-[#0d1117] text-xs rounded-lg font-bold transition-all hover:scale-105 active:scale-95", children: starting ? 'Đang khởi động…' : label }));
+    const body = () => {
+        if (!data && !errMsg)
+            return (_jsx("div", { className: "animate-pulse text-xs text-[#8b949e] py-3 text-center", children: "\u0110ang ki\u1EC3m tra\u2026" }));
+        if (data?.status === 'running')
+            return (_jsxs("div", { className: "py-8 text-center space-y-2", children: [_jsxs("div", { className: "text-xs text-cyan-300 animate-pulse", children: ["\u23F3 \u0110ang t\u1EA3i BCTC t\u1EEB Vietstock v\u00E0 ph\u00E2n t\u00EDch b\u1EB1ng ", providerLabel, "\u2026 (~1\u20132 ph\u00FAt)"] }), _jsx("div", { className: "text-[10px] text-[#8b949e]/60", children: "Trang t\u1EF1 c\u1EADp nh\u1EADt khi xong \u2014 kh\u00F4ng c\u1EA7n t\u1EA3i l\u1EA1i." })] }));
+        if (errMsg || data?.status === 'error')
+            return (_jsxs("div", { className: "py-6 text-center space-y-3", children: [_jsxs("div", { className: "text-xs text-red-300 bg-red-950/40 border border-red-800 rounded-lg px-3 py-2 inline-block max-w-lg", children: ["\u2715 ", errMsg ?? data?.error ?? 'Lỗi không xác định'] }), _jsx("div", { children: startButton('↻ Thử lại') })] }));
+        if (data?.status === 'ready')
+            return (_jsxs("div", { className: "space-y-3", children: [_jsxs("div", { className: "flex items-center justify-between gap-2 flex-wrap", children: [_jsxs("div", { className: "text-xs", children: [_jsx("span", { className: "font-bold text-[#e6edf3]", children: data.title }), data.pdf_url && (_jsx("a", { href: data.pdf_url, target: "_blank", rel: "noreferrer", className: "ml-2 text-[#58a6ff] hover:underline", children: "PDF g\u1ED1c \u2197" })), _jsxs("div", { className: "text-[10px] text-[#8b949e]/60 mt-0.5", children: [data.model, " \u00B7 ph\u00E2n t\u00EDch l\u00FAc ", data.created_at?.slice(0, 16).replace('T', ' ')] })] }), startButton('↻ Kiểm tra quý mới')] }), _jsx("div", { className: "bg-[#161b22] border border-[#30363d] rounded-lg p-4 max-h-[28rem] overflow-y-auto", children: _jsx(MdLite, { text: data.analysis ?? '' }) })] }));
+        // status === 'none' — chưa có phân tích nào
+        return (_jsxs("div", { className: "py-8 text-center space-y-3", children: [_jsxs("div", { className: "text-xs text-[#8b949e]", children: ["Ch\u01B0a c\u00F3 ph\u00E2n t\u00EDch BCTC b\u1EB1ng ", providerLabel, " cho ", _jsx("span", { className: "text-[#e6edf3] font-semibold", children: symbol }), "."] }), _jsxs("div", { className: "text-[10px] text-[#8b949e]/60 max-w-md mx-auto", children: ["H\u1EC7 th\u1ED1ng s\u1EBD crawl BCTC qu\u00FD g\u1EA7n nh\u1EA5t t\u1EEB Vietstock, g\u1EEDi cho ", providerLabel, " ph\u00E2n t\u00EDch (ch\u1EA5t l\u01B0\u1EE3ng l\u1EE3i nhu\u1EADn, d\u00F2ng ti\u1EC1n, \u0111\u1ECBnh gi\u00E1, k\u1EBFt h\u1EE3p Wyckoff) r\u1ED3i l\u01B0u l\u1EA1i \u2014 m\u1ED7i qu\u00FD ch\u1EC9 ph\u00E2n t\u00EDch m\u1ED9t l\u1EA7n cho m\u1ED7i AI."] }), startButton(`📑 Phân tích bằng ${providerLabel}`)] }));
+    };
+    return (_jsxs("div", { className: "space-y-3", children: [providerTabs, body()] }));
+}
 export function SymbolModal({ symbol, name, onClose }) {
     const [quotes, setQuotes] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -204,7 +316,7 @@ export function SymbolModal({ symbol, name, onClose }) {
     return (_jsx("div", { className: "fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4", onClick: e => { if (e.target === e.currentTarget) {
             setShowPicker(false);
             onClose();
-        } }, children: _jsxs("div", { className: "bg-[#161b22] border border-[#30363d] rounded-xl p-5 w-full max-w-5xl max-h-[95vh] overflow-y-auto shadow-2xl", children: [_jsxs("div", { className: "flex items-start justify-between mb-4", children: [_jsxs("div", { children: [_jsxs("div", { className: "flex items-center gap-3", children: [_jsx("span", { className: "text-xl font-bold text-[#e6edf3] tracking-wide", children: symbol }), latest && _jsx(ChangePct, { v: chg })] }), _jsx("div", { className: "text-xs text-[#8b949e] mt-0.5 max-w-xs truncate", children: name })] }), _jsxs("div", { className: "flex items-center gap-2 ml-4", children: [_jsx("button", { onClick: handleAssumeBuy, disabled: buying, title: "Assume you buy 1,000 shares now at the latest close, then track it on the Portfolio tab", className: `px-3 py-1.5 rounded-lg text-xs font-bold border transition-all
+        } }, children: _jsxs("div", { className: "bg-[#161b22] border border-[#30363d] rounded-xl p-4 w-full max-w-[92vw] max-h-[95vh] overflow-y-auto shadow-2xl", children: [_jsxs("div", { className: "flex items-start justify-between mb-4", children: [_jsxs("div", { children: [_jsxs("div", { className: "flex items-center gap-3", children: [_jsx("span", { className: "text-xl font-bold text-[#e6edf3] tracking-wide", children: symbol }), latest && _jsx(ChangePct, { v: chg })] }), _jsx("div", { className: "text-xs text-[#8b949e] mt-0.5 max-w-xs truncate", children: name })] }), _jsxs("div", { className: "flex items-center gap-2 ml-4", children: [_jsx("button", { onClick: handleAssumeBuy, disabled: buying, title: "Assume you buy 1,000 shares now at the latest close, then track it on the Portfolio tab", className: `px-3 py-1.5 rounded-lg text-xs font-bold border transition-all
                 disabled:opacity-50 disabled:cursor-not-allowed
                 ${buying
                                         ? 'bg-emerald-950 border-emerald-700 text-emerald-300 animate-pulse'
@@ -212,6 +324,7 @@ export function SymbolModal({ symbol, name, onClose }) {
                                     { id: 'chart', label: '📈 Chart' },
                                     { id: 'wyckoff', label: '〜 Wyckoff' },
                                     { id: 'xgb', label: '🤖 XGB Pred' },
+                                    { id: 'report', label: '📑 BCTC' },
                                 ].map(({ id, label }) => (_jsx("button", { onClick: () => setActivePanel(id), className: `px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
                   ${activePanel === id
                                         ? 'bg-[#21262d] border-[#58a6ff] text-[#58a6ff]'
@@ -229,5 +342,5 @@ export function SymbolModal({ symbol, name, onClose }) {
                         { label: 'Open', value: fmtPrice(latest.open) },
                         { label: 'High', value: fmtPrice(latest.high) },
                         { label: 'Low', value: fmtPrice(latest.low) },
-                    ].map(({ label, value }) => (_jsxs("div", { className: "bg-[#0d1117] border border-[#30363d] rounded-lg p-2.5 text-center", children: [_jsx("div", { className: "text-sm font-bold text-[#e6edf3] tabular-nums", children: value }), _jsx("div", { className: "text-xs text-[#8b949e]", children: label })] }, label))) })), activePanel === 'chart' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "text-xs text-[#8b949e] mb-1 flex items-center gap-2", children: [_jsxs("span", { children: [quotes.length, " trading days"] }), fetchMsg && _jsxs("span", { className: "text-cyan-300 animate-pulse", children: ["\u00B7 ", fetchMsg] })] }), loading ? (_jsx("div", { className: "h-48 flex items-center justify-center text-[#8b949e] text-xs animate-pulse", children: "Loading\u2026" })) : quotes.length < 5 ? (_jsxs("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-6 flex flex-col items-center gap-3 text-center", children: [_jsxs("div", { className: "text-[#8b949e] text-xs", children: ["No price history found for ", _jsx("span", { className: "text-[#e6edf3] font-semibold", children: symbol })] }), _jsx("div", { className: "text-[#8b949e]/60 text-xs", children: "Run \"Full History\" in the Crawl tab, or load just this symbol:" }), _jsx("button", { onClick: handleFetchHistory, disabled: fetchingHist || pollRef.current !== null, className: "px-4 py-2 bg-[#58a6ff] hover:bg-[#79b8ff] disabled:opacity-50 disabled:cursor-not-allowed\n                             text-[#0d1117] text-xs rounded-lg font-bold transition-all hover:scale-105 active:scale-95", children: fetchingHist ? 'Starting…' : pollRef.current ? 'Fetching…' : '↓ Load History for this symbol' }), fetchMsg && (_jsx("div", { className: "text-xs text-[#58a6ff] animate-pulse", children: fetchMsg }))] })) : (_jsx("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-3", onClick: () => setShowPicker(false), children: _jsx(InteractiveChart, { quotes: quotes, indicators: indicators }) }))] })) : activePanel === 'wyckoff' ? (_jsxs("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4", children: [_jsx("div", { className: "text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3", children: "Wyckoff Analysis" }), _jsx(WyckoffPanel, { symbol: symbol })] })) : (_jsxs("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4", children: [_jsx("div", { className: "text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3", children: "XGBoost Prediction \u00B7 5-day horizon" }), _jsx(XGBPanel, { symbol: symbol })] }))] }) }));
+                    ].map(({ label, value }) => (_jsxs("div", { className: "bg-[#0d1117] border border-[#30363d] rounded-lg p-2.5 text-center", children: [_jsx("div", { className: "text-sm font-bold text-[#e6edf3] tabular-nums", children: value }), _jsx("div", { className: "text-xs text-[#8b949e]", children: label })] }, label))) })), activePanel === 'chart' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "text-xs text-[#8b949e] mb-1 flex items-center gap-2", children: [_jsxs("span", { children: [quotes.length, " trading days"] }), fetchMsg && _jsxs("span", { className: "text-cyan-300 animate-pulse", children: ["\u00B7 ", fetchMsg] })] }), loading ? (_jsx("div", { className: "h-48 flex items-center justify-center text-[#8b949e] text-xs animate-pulse", children: "Loading\u2026" })) : quotes.length < 5 ? (_jsxs("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-6 flex flex-col items-center gap-3 text-center", children: [_jsxs("div", { className: "text-[#8b949e] text-xs", children: ["No price history found for ", _jsx("span", { className: "text-[#e6edf3] font-semibold", children: symbol })] }), _jsx("div", { className: "text-[#8b949e]/60 text-xs", children: "Run \"Full History\" in the Crawl tab, or load just this symbol:" }), _jsx("button", { onClick: handleFetchHistory, disabled: fetchingHist || pollRef.current !== null, className: "px-4 py-2 bg-[#58a6ff] hover:bg-[#79b8ff] disabled:opacity-50 disabled:cursor-not-allowed\n                             text-[#0d1117] text-xs rounded-lg font-bold transition-all hover:scale-105 active:scale-95", children: fetchingHist ? 'Starting…' : pollRef.current ? 'Fetching…' : '↓ Load History for this symbol' }), fetchMsg && (_jsx("div", { className: "text-xs text-[#58a6ff] animate-pulse", children: fetchMsg }))] })) : (_jsx("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-2", onClick: () => setShowPicker(false), children: _jsx(InteractiveChart, { quotes: quotes, indicators: indicators }) }))] })) : activePanel === 'wyckoff' ? (_jsxs("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4", children: [_jsx("div", { className: "text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3", children: "Wyckoff Analysis" }), _jsx(WyckoffPanel, { symbol: symbol })] })) : activePanel === 'xgb' ? (_jsxs("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4", children: [_jsx("div", { className: "text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3", children: "XGBoost Prediction \u00B7 5-day horizon" }), _jsx(XGBPanel, { symbol: symbol })] })) : (_jsxs("div", { className: "mb-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4", children: [_jsx("div", { className: "text-xs text-[#8b949e] font-semibold uppercase tracking-wider mb-3", children: "Ph\u00E2n t\u00EDch BCTC qu\u00FD g\u1EA7n nh\u1EA5t \u00B7 Vietstock \u2192 Gemini" }), _jsx(ReportPanel, { symbol: symbol })] }))] }) }));
 }
