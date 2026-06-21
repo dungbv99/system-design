@@ -1,14 +1,17 @@
 """
-Parameter optimizer — random search + local grid refinement.
+Parameter optimizer — Optuna Bayesian (TPE) search + local grid refinement.
 
-Samples the parameter space (PARAM_GRID), scores each combination with a
-multi-objective function that rewards Sharpe and raw return while heavily
-penalising drawdown > 25% and win-rate < 55%, and selects the best params —
-separately per market regime.
+Searches the TUNE_PARAMS space with Optuna's Tree-structured Parzen Estimator —
+it learns from earlier trials instead of sampling blindly, so ~100-200 Bayesian
+trials typically beat 1000 random ones.  Each trial is scored by a multi-objective
+function that rewards Sharpe and raw return while heavily penalising drawdown >
+25% and win-rate < 55%, and the best params are selected separately per market
+regime.
 
-Random search first (cheap, broad), then an optional local grid search around the
-best seed.  All evaluations reuse a shared, pre-computed BacktestContext so a
-sweep over hundreds of samples stays tractable in pure Python.
+Every trial starts from DEFAULT_PARAMS, overlays the economically-fixed
+FIXED_PARAMS, then lets Optuna suggest one categorical value per TUNE_PARAMS key
+(see wyckoff_opt.py §9.2).  All evaluations reuse a shared, pre-computed
+BacktestContext so a sweep over hundreds of trials stays tractable.
 
 See README_WYCKOFF_OPTIMIZED.md §9.
 """
@@ -18,11 +21,17 @@ from __future__ import annotations
 import logging
 import random
 
+import optuna
+
 import opt_backtest as obt
-from wyckoff_opt import DEFAULT_PARAMS
+from wyckoff_opt import DEFAULT_PARAMS, FIXED_PARAMS, TUNE_PARAMS
 
 log = logging.getLogger(__name__)
 
+# Optuna is chatty per-trial; keep our own progress logging instead.
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+# Legacy grid retained for local_grid_search refinement around an Optuna seed.
 PARAM_GRID: dict[str, list] = {
     # Wyckoff core
     "lookback":               [120, 180, 260],
@@ -60,20 +69,20 @@ REGIME_YEARS = {
 }
 
 
-# ── Objective ─────────────────────────────────────────────────────────────────
+# ── Objective / score ─────────────────────────────────────────────────────────
 
-def objective(result: obt.BacktestResult) -> float:
-    """Multi-objective score (higher is better).  README §9.2.
+def _score(result: obt.BacktestResult) -> float:
+    """Multi-objective score (higher is better).  README §9.2/§9.4.
 
     Works on fractions: annual_return / max_drawdown / win_rate are normalised so
     no single term dominates regardless of magnitude.
     """
     annual = result.annual_return / 100.0
     score = (
-        result.sharpe_ratio * 2.0
-        - max(0.0, result.max_drawdown - 0.25) * 5.0
-        - max(0.0, 0.55 - result.win_rate) * 3.0
-        + annual * 0.5
+        result.sharpe_ratio * 2.0                      # Sharpe (most important)
+        - max(0.0, result.max_drawdown - 0.25) * 5.0   # heavy penalty if DD > 25%
+        - max(0.0, 0.55 - result.win_rate) * 3.0       # penalty if win rate < 55%
+        + annual * 0.5                                 # reward raw return
     )
     # Discourage degenerate "no-trade" param sets in non-downtrend windows.
     if result.total_trades == 0:
@@ -81,40 +90,105 @@ def objective(result: obt.BacktestResult) -> float:
     return score
 
 
-# ── Sampling ──────────────────────────────────────────────────────────────────
+# Backwards-compatible alias (local_grid_search and older callers use objective()).
+objective = _score
 
-def _sample_params(rng: random.Random) -> dict:
+
+def _base_params() -> dict:
+    """Full param set seed: DEFAULT overlaid with the economically-fixed values."""
     p = dict(DEFAULT_PARAMS)
-    for key, choices in PARAM_GRID.items():
-        p[key] = rng.choice(choices)
+    p.update(FIXED_PARAMS)
     return p
 
 
+# ── Optuna Bayesian search ────────────────────────────────────────────────────
+
+def make_objective(data: dict, capital: float, train_split: tuple,
+                   regime_years: list[str] | None = None,
+                   ctx: obt.BacktestContext | None = None):
+    """Build the Optuna objective closure for one search (README §9.3).
+
+    Each trial starts from the full base param set, then Optuna suggests one value
+    per TUNE_PARAMS key.  If ``regime_years`` is given the trial is scored as the
+    mean over those calendar years; otherwise over the ``train_split`` window.
+    """
+    start, end = train_split
+
+    def objective(trial: optuna.Trial) -> float:
+        params = _base_params()
+        for key, choices in TUNE_PARAMS.items():
+            params[key] = trial.suggest_categorical(key, choices)
+
+        if regime_years:
+            scores = []
+            for year in regime_years:
+                res = obt.run_backtest(data, params, capital,
+                                       f"{year}-01-01", f"{year}-12-31", ctx=ctx)
+                scores.append(_score(res))
+            return sum(scores) / len(scores)
+
+        res = obt.run_backtest(data, params, capital, start, end, ctx=ctx)
+        return _score(res)
+
+    return objective
+
+
+def run_optuna(data: dict, capital: float, train_split: tuple, n_trials: int = 100,
+               regime_years: list[str] | None = None, n_jobs: int = 7,
+               study_name: str = "wyckoff",
+               ctx: obt.BacktestContext | None = None, tick=None) -> optuna.Study:
+    """Run Optuna Bayesian (TPE) optimization, parallel across ``n_jobs`` cores.
+
+    ``tick`` — optional no-arg callable fired once per finished trial (progress).
+    Returns the completed Optuna ``Study``.
+    """
+    study = optuna.create_study(
+        direction="maximize",
+        study_name=study_name,
+        sampler=optuna.samplers.TPESampler(seed=42),  # Bayesian TPE
+    )
+
+    callbacks = []
+    if tick is not None:
+        callbacks.append(lambda study, trial: tick())
+
+    study.optimize(
+        make_objective(data, capital, train_split, regime_years, ctx=ctx),
+        n_trials=n_trials,
+        n_jobs=n_jobs,                 # parallel across cores
+        show_progress_bar=True,
+        callbacks=callbacks or None,
+    )
+    return study
+
+
+# ── Compatibility wrapper — ranked (params, score) list ───────────────────────
+
 def random_search(data: dict, capital: float, train_split: tuple,
                   n_samples: int, ctx: obt.BacktestContext | None = None,
-                  seed: int = 42, tick=None) -> list[tuple[dict, float]]:
-    """Sample ``n_samples`` param combos, backtest each on ``train_split``.
+                  seed: int = 42, tick=None, n_jobs: int = 7) -> list[tuple[dict, float]]:
+    """Optuna Bayesian search over ``n_samples`` trials on ``train_split``.
 
-    ``tick`` — optional no-arg callable invoked once per sample for progress.
-    Returns ``[(params, score), …]`` sorted by score descending.
+    Replaces the old random sampler (README §9.3) but keeps the same return shape
+    callers expect: ``[(params, score), …]`` sorted by score descending, so the
+    walk-forward driver in opt_backtest.py works unchanged.
     """
-    rng = random.Random(seed)
     start, end = train_split
+    study = run_optuna(data, capital, train_split, n_trials=n_samples,
+                       regime_years=None, n_jobs=n_jobs,
+                       study_name=f"wf_{start}_{end}", ctx=ctx, tick=tick)
+
     results: list[tuple[dict, float]] = []
-    for i in range(n_samples):
-        params = _sample_params(rng)
-        res = obt.run_backtest(data, params, capital, start, end, ctx=ctx)
-        score = objective(res)
-        results.append((params, score))
-        if tick:
-            tick()
-        if (i + 1) % 50 == 0:
-            best = max(results, key=lambda r: r[1])
-            br = obt.run_backtest(data, best[0], capital, start, end, ctx=ctx)
-            log.info("Optimizer [%d/%d] best_score=%.2f annual=%.1f%% sharpe=%.2f drawdown=%.0f%%",
-                     i + 1, n_samples, best[1], br.annual_return, br.sharpe_ratio,
-                     br.max_drawdown * 100)
+    for t in study.trials:
+        if t.value is None:
+            continue
+        params = _base_params()
+        params.update(t.params)
+        results.append((params, t.value))
     results.sort(key=lambda r: r[1], reverse=True)
+
+    if results:
+        log.info("Optuna search [%d trials] best_score=%.2f", len(results), results[0][1])
     return results
 
 
@@ -125,10 +199,11 @@ def local_grid_search(data: dict, capital: float, train_split: tuple,
 
     Coordinate descent: optimise one parameter at a time, keeping the rest fixed
     at the running best — far cheaper than the full cartesian neighbourhood.
+    Useful for sharpening an Optuna winner on the coarse PARAM_GRID lattice.
     """
     start, end = train_split
     best = dict(seed_params)
-    best_score = objective(obt.run_backtest(data, best, capital, start, end, ctx=ctx))
+    best_score = _score(obt.run_backtest(data, best, capital, start, end, ctx=ctx))
     for key, choices in PARAM_GRID.items():
         if key not in best or best[key] not in choices:
             continue
@@ -139,7 +214,7 @@ def local_grid_search(data: dict, capital: float, train_split: tuple,
                 continue
             trial = dict(best)
             trial[key] = choices[ni]
-            score = objective(obt.run_backtest(data, trial, capital, start, end, ctx=ctx))
+            score = _score(obt.run_backtest(data, trial, capital, start, end, ctx=ctx))
             if score > best_score:
                 best, best_score = trial, score
     return best, best_score
@@ -147,44 +222,48 @@ def local_grid_search(data: dict, capital: float, train_split: tuple,
 
 # ── Per-regime optimisation ───────────────────────────────────────────────────
 
-def _score_on_years(data: dict, capital: float, params: dict, years: list[str],
-                    ctx: obt.BacktestContext | None) -> tuple[float, float]:
-    """Average objective + Sharpe of ``params`` across the regime's years."""
-    scores, sharpes = [], []
-    for y in years:
-        res = obt.run_backtest(data, params, capital, f"{y}-01-01", f"{y}-12-31", ctx=ctx)
-        scores.append(objective(res))
-        sharpes.append(res.sharpe_ratio)
-    if not scores:
-        return -999.0, 0.0
-    return sum(scores) / len(scores), sum(sharpes) / len(sharpes)
-
-
 def optimize_per_regime(data: dict, capital: float,
                         ctx: obt.BacktestContext | None = None,
-                        n_samples: int = 500) -> dict[str, dict]:
-    """Optimise separately for UPTREND / SIDEWAYS / DOWNTREND.
+                        n_trials: int = 100,
+                        n_samples: int | None = None) -> dict[str, dict]:
+    """Run Optuna separately for UPTREND / SIDEWAYS / DOWNTREND (README §9.3).
 
-    Strategy: one broad random search over the full range to get strong
-    candidates, then re-rank the top candidates on each regime's own years.
-    Returns ``{regime: {'params':…, 'sharpe':…, 'run_id': None}}``.
+    ``n_samples`` is accepted as an alias for ``n_trials`` (opt_backtest passes it).
+    Returns ``{regime: {'params': …, 'sharpe': best_value, 'run_id': None}}`` where
+    ``params`` is a full param set ready to persist.
     """
-    import progress as _pr
-    _pr.get().set_phase("optimize", max(1, n_samples), "per-regime parameter search")
-    ranked = random_search(data, capital, ("2014-01-01", "2025-12-31"),
-                           n_samples, ctx=ctx, tick=_pr.get().tick)
-    if not ranked:
-        return {r: {"params": dict(DEFAULT_PARAMS), "sharpe": 0.0, "run_id": None}
-                for r in REGIME_YEARS}
+    if n_samples is not None:
+        n_trials = n_samples
 
-    top = [p for p, _ in ranked[:max(5, len(ranked) // 10)]]
     out: dict[str, dict] = {}
-    for reg, years in REGIME_YEARS.items():
-        best_params, best_score, best_sharpe = top[0], -1e9, 0.0
-        for params in top:
-            score, sharpe = _score_on_years(data, capital, params, years, ctx)
-            if score > best_score:
-                best_params, best_score, best_sharpe = params, score, sharpe
-        out[reg] = {"params": best_params, "sharpe": round(best_sharpe, 3), "run_id": None}
-        log.info("optimize_per_regime %s: best_score=%.2f sharpe=%.2f", reg, best_score, best_sharpe)
+    for regime, years in REGIME_YEARS.items():
+        print(f"\nOptimizing {regime} ({years})...")
+        try:
+            import progress as _pr
+            _pr.get().set_phase(f"optimize_{regime.lower()}", max(1, n_trials),
+                                f"Optuna {regime}")
+            tick = _pr.get().tick
+        except Exception:  # noqa: BLE001 — progress is best-effort
+            tick = None
+
+        study = run_optuna(
+            data, capital,
+            train_split=("2014-01-01", "2025-12-31"),
+            n_trials=n_trials,
+            regime_years=years,
+            study_name=f"wyckoff_{regime.lower()}",
+            ctx=ctx,
+            tick=tick,
+        )
+
+        best = _base_params()
+        best.update(study.best_params)  # merge Optuna winners over the base set
+        out[regime] = {
+            "params": best,
+            "sharpe": round(float(study.best_value), 3),
+            "run_id": None,
+        }
+        print(f"  Best score: {study.best_value:.3f}")
+        print(f"  Best params: {study.best_params}")
+        log.info("optimize_per_regime %s: best_score=%.3f", regime, study.best_value)
     return out

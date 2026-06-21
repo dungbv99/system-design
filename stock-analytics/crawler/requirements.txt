@@ -9,3 +9,4 @@ numpy>=1.26
 curl-cffi>=0.7
 pytest>=8.0
 anthropic>=0.40
+optuna>=3.0

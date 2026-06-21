@@ -64,6 +64,40 @@ DEFAULT_PARAMS: dict = {
 }
 
 
+# ── Optuna optimization split (README §9.2) ───────────────────────────────────
+# FIXED_PARAMS — values with a clear economic rationale; never optimized.
+# TUNE_PARAMS  — the only params Optuna searches over (~3,000 combinations),
+# keyed to the categorical choices each trial samples from.  optimizer.py reads
+# both: every trial starts from DEFAULT_PARAMS, overlays FIXED_PARAMS, then lets
+# Optuna suggest one value per TUNE_PARAMS key.
+FIXED_PARAMS: dict = {
+    "lookback":      260,   # 1 nam data la du de detect phase
+    "max_hold":      260,   # giu toi da 1 nam nhu thiet ke
+    "max_positions":   8,   # da dang hoa hop ly
+    "range_bars":    120,   # S/R detection window
+    "pivot_bars":      3,   # swing pivot confirmation
+}
+
+TUNE_PARAMS: dict = {
+    # Wyckoff volume thresholds
+    "climax_vol_mult":        [1.6, 1.8, 2.0, 2.2],
+    "hi_vol_mult":            [1.2, 1.4, 1.6],
+    "lo_vol_mult":            [0.5, 0.7, 0.8],
+    # Entry filters
+    "rsi_entry_max":          [45, 50, 55],
+    "rsi_exit_min":           [65, 70, 75],
+    "bb_squeeze_thresh":      [0.03, 0.05, 0.07],
+    "min_signal_score":       [3, 4, 5],
+    # Risk management
+    "atr_stop_mult":          [1.5, 2.0, 2.5, 3.0],
+    "atr_trail_pct":          [0.80, 0.85, 0.90],
+    # Market filters
+    "top_n_sectors":          [2, 3, 4],
+    "downtrend_drawdown_pct": [0.08, 0.10, 0.12],
+    "rs_min_ratio":           [0.9, 1.0, 1.1],
+}
+
+
 def merge_params(params: Optional[dict]) -> dict:
     """Return DEFAULT_PARAMS overlaid with any provided overrides."""
     merged = dict(DEFAULT_PARAMS)
