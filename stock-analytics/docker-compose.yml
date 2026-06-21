@@ -6,7 +6,11 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: stock
     volumes:
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # First-init hook: restore from stock_dump.sql.gz if present, else apply
+      # init.sql (schema only). Runs once, only when pg_data is empty.
+      - ./db/restore.sh:/docker-entrypoint-initdb.d/00-restore.sh:ro
+      - ./db/init.sql:/seed/init.sql:ro
+      - ./stock_dump.sql.gz:/seed/stock_dump.sql.gz:ro
       - pg_data:/var/lib/postgresql/data
     ports:
       - "5435:5432"
