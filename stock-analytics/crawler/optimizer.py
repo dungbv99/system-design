@@ -206,37 +206,27 @@ def run_optuna(data: dict, capital: float, train_split: tuple, n_trials: int = 1
                     done += 1
                     if tick is not None:
                         tick()
-                try:
-                    best = study.best_value
-                except ValueError:           # whole batch failed — no completed trial
-                    best = float("nan")
-                log.info("  [%s] %d/%d trials  best=%.3f", study_name, done, n_trials, best)
+        try:
+            best = study.best_value
+        except ValueError:           # all trials failed — no completed trial
+            best = float("nan")
+        log.info("  [%s] %d trials done, best=%.3f", study_name, done, best)
         return study
 
     # ── Single-process path (default) ───────────────────────────────────────
-    callbacks = []
-    if tick is not None:
-        callbacks.append(lambda study, trial: tick())
-
-    # Per-trial heartbeat: one log line per finished trial so a redirected log
-    # file (nohup) shows live progress instead of a long buffered silence.
-    def _log_trial(study: optuna.Study, trial: optuna.Trial) -> None:
-        val = trial.value if trial.value is not None else float("nan")
-        try:
-            best = study.best_value
-        except ValueError:           # no completed trial yet
-            best = float("nan")
-        log.info("  [%s] trial %d/%d  score=%.3f  best=%.3f",
-                 study_name, trial.number + 1, n_trials, val, best)
-    callbacks.append(_log_trial)
-
+    callbacks = [lambda study, trial: tick()] if tick is not None else None
     study.optimize(
         make_objective(data, capital, train_split, regime_years, ctx=ctx),
         n_trials=n_trials,
         n_jobs=n_jobs,                 # threads only — GIL-bound for pure Python
-        show_progress_bar=False,       # replaced by the per-trial log above
+        show_progress_bar=False,
         callbacks=callbacks,
     )
+    try:
+        best = study.best_value
+    except ValueError:               # no completed trial
+        best = float("nan")
+    log.info("  [%s] %d trials done, best=%.3f", study_name, len(study.trials), best)
     return study
 
 
