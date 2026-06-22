@@ -37,6 +37,8 @@ class Position:
     ecosystem:     Optional[str] = None
     rs_weak_streak: int = 0          # consecutive days RS below exit ratio
     max_hold_days: int = 260
+    bars_held:     int = 0           # trading days held (incremented by the backtest loop)
+    min_hold_days: int = 0           # T+ lock: no exit until held >= this many bars (0 = off)
     exit_date:     Optional[str]   = None
     exit_price:    Optional[float] = None
     exit_type:     Optional[str]   = None   # STOP_LOSS|WYCKOFF_EXIT|REGIME_EXIT|MAX_HOLD|RS_EXIT|MANUAL
@@ -93,6 +95,7 @@ def open_position(portfolio: Portfolio, symbol: str, entry_date: str,
         shares=shares, stop_loss=stop, trailing_stop=stop,
         atr_at_entry=atr, running_max=entry_price,
         max_hold_days=p["max_hold_days"],
+        min_hold_days=p.get("min_hold_days", 0),
         regime_at_entry=meta.get("regime", ""),
         wyckoff_phase=meta.get("wyckoff_phase", ""),
         sector=meta.get("sector", ""),
@@ -143,6 +146,9 @@ def update_trailing_stops(portfolio: Portfolio, prices: dict[str, float],
     for pos in portfolio.open_positions[:]:
         px = prices.get(pos.symbol)
         if px is None or px <= 0:
+            continue
+        if pos.bars_held < pos.min_hold_days:   # T+ lock — ratchet stop but can't sell yet
+            pos.running_max = max(pos.running_max, px)
             continue
         pos.running_max = max(pos.running_max, px)
         pos.trailing_stop = max(

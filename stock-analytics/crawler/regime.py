@@ -96,8 +96,8 @@ def _classify(bars: list[dict], params: dict, with_wyckoff: bool = True) -> Regi
     layers = trend + mom + breadth
     if trend == 1 and mom == 1 and breadth == 1:
         regime = UPTREND
-    elif trend == -1 and mom == -1 and breadth == -1:
-        regime = DOWNTREND
+    elif layers <= -2:          # 2 of 3 layers bearish — catch downtrends EARLIER
+        regime = DOWNTREND      # (2022 only triggered on all-3, i.e. far too late)
     else:
         regime = SIDEWAYS
 

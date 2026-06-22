@@ -65,6 +65,7 @@ DEFAULT_PARAMS: dict = {
     # Portfolio
     "max_positions":          8,
     "max_hold_days":          260,
+    "min_hold_days":          3,    # VN T+ rule: can't sell before ~T+2/3 trading days
 }
 
 

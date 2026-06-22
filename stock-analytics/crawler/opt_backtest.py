@@ -328,15 +328,22 @@ def run_backtest(data: dict[str, list[dict]], params: dict, capital: float,
     index_series = _to_series(ctx.vnindex_bars) if ctx.vnindex_bars else None
 
     for di, day in enumerate(calendar):
+        for pos in pf.open_positions:          # one more trading day held (T+ accounting)
+            pos.bars_held += 1
         regime = regime_map.get(day, regime_mod.SIDEWAYS)
         close_prices = _close_prices(ctx, day)
 
-        # 1. DOWNTREND → exit everything at next open, no new entries (§4.4)
+        # 1. DOWNTREND → exit everything at next open, no new entries (§4.4).
+        #    T+ lock: positions held < min_hold_days can't be sold yet.
         if regime == regime_mod.DOWNTREND:
             if pf.open_positions:
                 nxt, next_opens = _next_open_prices(ctx, day)
-                regime_exit_count += exit_all_positions(
-                    pf, next_opens, nxt or day, "REGIME_EXIT")
+                for pos in pf.open_positions[:]:
+                    if pos.bars_held < pos.min_hold_days:
+                        continue
+                    close_position(pf, pos, nxt or day,
+                                   next_opens.get(pos.symbol, pos.entry_price), "REGIME_EXIT")
+                    regime_exit_count += 1
             daily_equity.append({"date": day, "equity": round(pf.equity(close_prices), 2)})
             continue
 
@@ -396,6 +403,8 @@ def _rs_exits(pf: Portfolio, ctx: BacktestContext, index_series: _SymSeries,
     ii = _idx_on_or_before(index_series, day)
     idx_closes = index_series.closes[:ii + 1] if ii >= 0 else None
     for pos in pf.open_positions[:]:
+        if pos.bars_held < pos.min_hold_days:   # T+ lock
+            continue
         s = ctx.series.get(pos.symbol)
         if not s:
             continue
@@ -413,6 +422,8 @@ def _wyckoff_exits(pf: Portfolio, day_snaps: list[dict], day: str,
                    close_prices: dict[str, float]) -> None:
     snap_by_sym = {s["symbol"]: s for s in day_snaps}
     for pos in pf.open_positions[:]:
+        if pos.bars_held < pos.min_hold_days:   # T+ lock
+            continue
         snap = snap_by_sym.get(pos.symbol)
         if not snap:
             continue
