@@ -18,10 +18,14 @@ See README_WYCKOFF_OPTIMIZED.md §9.
 
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import logging
+import multiprocessing as _mp
+import os
 import random
 
 import optuna
+from optuna.distributions import CategoricalDistribution
 
 import opt_backtest as obt
 from wyckoff_opt import DEFAULT_PARAMS, FIXED_PARAMS, TUNE_PARAMS
@@ -133,14 +137,42 @@ def make_objective(data: dict, capital: float, train_split: tuple,
     return objective
 
 
+# ── Multi-process worker (real cores; sidesteps the GIL) ──────────────────────
+# Optuna's n_jobs uses threads, so a pure-Python objective stays GIL-bound to one
+# core. To actually use N cores we evaluate trials in separate PROCESSES via
+# ask/tell. On Linux the pool is forked AFTER these module globals are set, so
+# each worker inherits the (read-only) BacktestContext copy-on-write — no pickling
+# of the large snapshots through the pool, no re-build per worker.
+_W_CTX = None
+_W_CAPITAL: float = 0.0
+_W_SPLIT: tuple = ("", "")
+_W_REGIME_YEARS = None
+
+
+def _eval_tune(tune_params: dict) -> float:
+    """Score one TUNE_PARAMS combination in a worker process (uses fork globals)."""
+    params = _base_params()
+    params.update(tune_params)
+    if _W_REGIME_YEARS:
+        scores = [
+            _score(obt.run_backtest({}, params, _W_CAPITAL,
+                                    f"{y}-01-01", f"{y}-12-31", ctx=_W_CTX))
+            for y in _W_REGIME_YEARS
+        ]
+        return sum(scores) / len(scores)
+    start, end = _W_SPLIT
+    return _score(obt.run_backtest({}, params, _W_CAPITAL, start, end, ctx=_W_CTX))
+
+
 def run_optuna(data: dict, capital: float, train_split: tuple, n_trials: int = 100,
                regime_years: list[str] | None = None, n_jobs: int = 7,
                study_name: str = "wyckoff",
                ctx: obt.BacktestContext | None = None, tick=None) -> optuna.Study:
-    """Run Optuna Bayesian (TPE) optimization, parallel across ``n_jobs`` cores.
+    """Run Optuna Bayesian (TPE) optimization.
 
+    Single-process by default. Set ``OPTUNA_PROCS`` > 1 to evaluate trials across
+    that many worker PROCESSES (real multi-core; needs a shared ``ctx``).
     ``tick`` — optional no-arg callable fired once per finished trial (progress).
-    Returns the completed Optuna ``Study``.
     """
     study = optuna.create_study(
         direction="maximize",
@@ -148,16 +180,62 @@ def run_optuna(data: dict, capital: float, train_split: tuple, n_trials: int = 1
         sampler=optuna.samplers.TPESampler(seed=42),  # Bayesian TPE
     )
 
+    n_procs = int(os.environ.get("OPTUNA_PROCS", "1"))
+
+    # ── Multi-process path (ask/tell + forked ProcessPool) ──────────────────
+    if n_procs > 1 and ctx is not None:
+        global _W_CTX, _W_CAPITAL, _W_SPLIT, _W_REGIME_YEARS
+        _W_CTX, _W_CAPITAL, _W_SPLIT, _W_REGIME_YEARS = ctx, capital, train_split, regime_years
+        dists = {k: CategoricalDistribution(v) for k, v in TUNE_PARAMS.items()}
+        mpctx = _mp.get_context("fork")
+        done = 0
+        log.info("  [%s] multi-process: %d workers × %d trials", study_name, n_procs, n_trials)
+        with _cf.ProcessPoolExecutor(max_workers=n_procs, mp_context=mpctx) as pool:
+            while done < n_trials:
+                batch = min(n_procs, n_trials - done)
+                trials = [study.ask(dists) for _ in range(batch)]
+                futs = [pool.submit(_eval_tune, t.params) for t in trials]
+                for t, f in zip(trials, futs):
+                    try:
+                        val = f.result()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("  [%s] trial failed: %s", study_name, e)
+                        study.tell(t, state=optuna.trial.TrialState.FAIL)
+                    else:
+                        study.tell(t, val)
+                    done += 1
+                    if tick is not None:
+                        tick()
+                try:
+                    best = study.best_value
+                except ValueError:           # whole batch failed — no completed trial
+                    best = float("nan")
+                log.info("  [%s] %d/%d trials  best=%.3f", study_name, done, n_trials, best)
+        return study
+
+    # ── Single-process path (default) ───────────────────────────────────────
     callbacks = []
     if tick is not None:
         callbacks.append(lambda study, trial: tick())
 
+    # Per-trial heartbeat: one log line per finished trial so a redirected log
+    # file (nohup) shows live progress instead of a long buffered silence.
+    def _log_trial(study: optuna.Study, trial: optuna.Trial) -> None:
+        val = trial.value if trial.value is not None else float("nan")
+        try:
+            best = study.best_value
+        except ValueError:           # no completed trial yet
+            best = float("nan")
+        log.info("  [%s] trial %d/%d  score=%.3f  best=%.3f",
+                 study_name, trial.number + 1, n_trials, val, best)
+    callbacks.append(_log_trial)
+
     study.optimize(
         make_objective(data, capital, train_split, regime_years, ctx=ctx),
         n_trials=n_trials,
-        n_jobs=n_jobs,                 # parallel across cores
-        show_progress_bar=True,
-        callbacks=callbacks or None,
+        n_jobs=n_jobs,                 # threads only — GIL-bound for pure Python
+        show_progress_bar=False,       # replaced by the per-trial log above
+        callbacks=callbacks,
     )
     return study
 

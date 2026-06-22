@@ -21,7 +21,10 @@ See README_WYCKOFF_OPTIMIZED.md §8.
 from __future__ import annotations
 
 import bisect
+import hashlib
 import logging
+import os
+import pickle
 import statistics
 from dataclasses import dataclass, field
 from datetime import date as date_cls
@@ -120,6 +123,7 @@ class BacktestContext:
     lookback:       int
     step:           int
     regime_cache:   dict = field(default_factory=dict)   # (ma_fast,ma_slow,dd,lookback) -> regime_map
+    cache_path:     str | None = None                    # disk cache this ctx came from / was saved to
 
 
 def _to_series(bars: list[dict]) -> _SymSeries:
@@ -147,6 +151,29 @@ def _next_trading(s: _SymSeries, day: str) -> tuple[str, float] | None:
     return s.dates[i], s.opens[i]
 
 
+# Bump when the snapshot-building logic changes, so old caches are invalidated
+# (the data fingerprint alone can't detect a code change).
+_CTX_CACHE_VERSION = 1
+
+
+def _ctx_cache_path(data: dict, lookback: int, step: int,
+                    start_date: str, end_date: str) -> str:
+    """Cache file keyed by a data fingerprint + build args. The fingerprint
+    (per-symbol bar count + last date) changes whenever new quotes are crawled,
+    so a stale cache is never reused; identical inputs across optimizer
+    iterations hit the cache and skip the ~1.5h precompute."""
+    fp = hashlib.md5()
+    for sym in sorted(data):
+        bars = data[sym]
+        fp.update(sym.encode())
+        fp.update(str(len(bars)).encode())
+        if bars:
+            fp.update(str(bars[-1].get("date", "")).encode())
+    fp.update(f"v{_CTX_CACHE_VERSION}|{lookback}|{step}|{start_date}|{end_date}".encode())
+    cdir = "output" if os.path.isdir("output") else "."
+    return os.path.join(cdir, f"ctx_cache_{fp.hexdigest()[:16]}.pkl")
+
+
 def build_context(data: dict[str, list[dict]], symbol_sectors: dict[str, str] | None = None,
                   lookback: int = 260, step: int = 5,
                   start_date: str = "2014-01-01", end_date: str = "2025-12-31",
@@ -155,7 +182,20 @@ def build_context(data: dict[str, list[dict]], symbol_sectors: dict[str, str] | 
 
     Snapshots are computed at a FIXED ``lookback`` — the optimizer's lookback
     range is therefore approximated by this value (documented limitation).
+
+    The result is cached to disk (only for full builds, ``progress=True``) so
+    repeated optimizer runs reuse the snapshots instead of recomputing them.
     """
+    cache_path = _ctx_cache_path(data, lookback, step, start_date, end_date)
+    if progress and os.path.exists(cache_path):
+        try:
+            with open(cache_path, "rb") as fh:
+                ctx = pickle.load(fh)
+            log.info("build_context: loaded cached snapshots from %s", cache_path)
+            return ctx
+        except Exception as e:  # noqa: BLE001
+            log.warning("build_context: cache load failed (%s) — rebuilding", e)
+
     symbol_sectors = symbol_sectors or {}
     vnindex_bars = [b for b in data.get(VNINDEX_SYM, []) if start_date <= str(b.get("date", "")) <= end_date]
     if not vnindex_bars:
@@ -222,11 +262,19 @@ def build_context(data: dict[str, list[dict]], symbol_sectors: dict[str, str] | 
             log.info("precompute snapshots [%d/%d] (%s) — %d symbols scanned",
                      n, total, day, len(day_snaps))
 
-    return BacktestContext(
+    ctx = BacktestContext(
         calendar=calendar, series=series, vnindex_bars=vnindex_bars,
         symbol_sectors=symbol_sectors, snapshots=snapshots,
-        lookback=lookback, step=step,
+        lookback=lookback, step=step, cache_path=cache_path,
     )
+    if progress:
+        try:
+            with open(cache_path, "wb") as fh:
+                pickle.dump(ctx, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            log.info("build_context: cached snapshots to %s", cache_path)
+        except Exception as e:  # noqa: BLE001
+            log.warning("build_context: cache save failed: %s", e)
+    return ctx
 
 
 def _slice_bars(s: _SymSeries, i: int, max_bars: int | None = None) -> list[dict]:

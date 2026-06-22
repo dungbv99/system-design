@@ -363,7 +363,9 @@ class Crawler:
         import wyckoff_opt
         reg_row    = self.store.get_regime()
         regime     = reg_row["regime"] if reg_row else None
-        params     = self.store.get_optimized_params(regime)
+        # get_optimized_params(None) returns an all-regimes mapping, not a flat
+        # param dict — guard with DEFAULT_PARAMS when no regime is known.
+        params     = self.store.get_optimized_params(regime) if regime else dict(wyckoff_opt.DEFAULT_PARAMS)
         lookback   = int(params.get("lookback", 260))
         index_bars = self.store.get_symbol_quotes("VNINDEX", days=400) or None
 
