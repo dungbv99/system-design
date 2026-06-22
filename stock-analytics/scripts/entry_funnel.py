@@ -50,12 +50,17 @@ regime_map = {r["date"]: r["regime"] for r in regime_series}
 
 scan_days = [d for d in ctx.calendar[::ctx.step] if START <= d <= END and d in ctx.snapshots]
 
+# Entry-eligible signals: BUY (Wyckoff breakout) + HOLD (Markup uptrend), matching
+# the backtest's _scan_entries (base.signal in ("BUY","HOLD")).
+ELIGIBLE = ("BUY", "HOLD")
+
 reg_days = Counter()
+sig_count = Counter()  # all base signals on tradeable days
 tradeable_days = 0
 tot_snaps = 0          # symbol-snapshots on tradeable days
-n_buy = 0              # base signal == BUY
+n_elig = 0             # base signal in ELIGIBLE
 score_hist = Counter()
-pass_score = 0         # BUY and score >= MIN
+pass_score = 0         # eligible and score >= MIN
 pass_sector = 0        # ...and sector in leading set
 thr = {2: 0, 3: 0, 4: 0, 5: 0}
 
@@ -72,9 +77,10 @@ for day in scan_days:
     for snap in snaps:
         tot_snaps += 1
         base = snap["base"]
-        if base.signal != "BUY":
+        sig_count[base.signal] += 1
+        if base.signal not in ELIGIBLE:
             continue
-        n_buy += 1
+        n_elig += 1
         try:
             score = compute_signal_score(base, snap["ind"], p)
         except Exception:
@@ -103,20 +109,21 @@ print(f"  tradeable days (non-DOWNTREND): {tradeable_days}"
       f"   [DOWNTREND blocks {reg_days.get(regime_mod.DOWNTREND, 0)} days entirely]")
 print("-" * 64)
 print(f"symbol-snapshots on tradeable days : {tot_snaps}")
-print(f"  → base signal == BUY             : {n_buy:>8}  ({pct(n_buy, tot_snaps)} of snaps)")
-print(f"    → score >= {MIN} (min_signal)      : {pass_score:>8}  ({pct(pass_score, n_buy)} of BUYs)")
+print(f"  signal breakdown: " + "  ".join(f"{s}={n}" for s, n in sig_count.most_common()))
+print(f"  → entry-eligible (BUY+HOLD)      : {n_elig:>8}  ({pct(n_elig, tot_snaps)} of snaps)")
+print(f"    → score >= {MIN} (min_signal)      : {pass_score:>8}  ({pct(pass_score, n_elig)} of eligible)")
 print(f"      → sector in leading set      : {pass_sector:>8}  ({pct(pass_sector, pass_score)} of those)")
 print("-" * 64)
-print("score histogram of BUY signals (0..8):")
+print("score histogram of eligible signals (0..8):")
 for s in range(0, 9):
-    bar = "#" * min(60, score_hist.get(s, 0) // max(1, n_buy // 60 or 1))
+    bar = "#" * min(60, score_hist.get(s, 0) // max(1, n_elig // 60 or 1))
     print(f"  score {s}: {score_hist.get(s, 0):>7}  {bar}")
 print("-" * 64)
-print("min_signal_score sensitivity (BUY signals passing each threshold):")
+print("min_signal_score sensitivity (eligible signals passing each threshold):")
 for t in sorted(thr):
-    print(f"  score >= {t}: {thr[t]:>8}  ({pct(thr[t], n_buy)} of BUYs)")
+    print(f"  score >= {t}: {thr[t]:>8}  ({pct(thr[t], n_elig)} of eligible)")
 print("=" * 64)
-print(f"FINAL entry supply (BUY & score>={MIN} & sector-leading): {pass_sector}"
+print(f"FINAL entry supply (BUY/HOLD & score>={MIN} & sector-leading): {pass_sector}"
       f"  over {tradeable_days} tradeable days  =  {pass_sector / tradeable_days:.2f}/day"
       if tradeable_days else "no tradeable days")
 print("(portfolio slot cap + ecosystem cap + already-held further reduce actual entries)")

@@ -447,7 +447,11 @@ def _scan_entries(pf: Portfolio, ctx: BacktestContext, day: str,
             continue
         base = snap["base"]
         score = compute_signal_score(base, snap["ind"], p)
-        if base.signal == "BUY" and score >= p["min_signal_score"]:
+        # Enter on Wyckoff accumulation breakouts (BUY) AND established uptrends
+        # (HOLD = Markup with price>=MA20). HOLD only ever comes from the Markup
+        # branch of _generate_signal, so this is "buy strength" — the score gate
+        # (RSI/MACD/CMF/RS) still controls quality. Backtest/opt path only.
+        if base.signal in ("BUY", "HOLD") and score >= p["min_signal_score"]:
             candidates.append((score, snap))
 
     candidates.sort(key=lambda c: c[0], reverse=True)
