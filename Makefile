@@ -2,7 +2,7 @@
         build-live run-live stop-live clean-live logs-live \
         build-jobs run-jobs stop-jobs clean-jobs logs-jobs \
         build-stock run-stock stop-stock clean-stock logs-stock crawl-now \
-        mark-vn100 backtest backtest-quick optimize live-scan full-pipeline clean-backtest backtest-progress claude-optimize \
+        mark-vn100 backtest backtest-quick optimize live-scan full-pipeline clean-backtest backtest-progress claude-optimize claude-optimize-quick \
         build-java build-go deps test test-java test-go \
         new-go-service
 
@@ -143,15 +143,26 @@ backtest-progress:
 	         f\"elapsed={d.get('elapsed_sec',0)}s\" + (f' eta~{eta}s' if eta else '') + \
 	         ('' if d.get('active') or d.get('running') else '  (idle)'))"
 
-# Iterative Optuna refinement loop driven by Claude (README §9.5 / §18.2).
-# Runs headless in the background; tweaks TUNE_PARAMS/FIXED_PARAMS each pass and
-# logs progress to stock-analytics/output/. Run `make run-stock` first.
+# Iterative Optuna refinement loop (README §9.5 / §18.2).
+# bash orchestrates: Optuna does the numeric search (0 tokens), bash checks the
+# stop conditions (0 tokens), and Claude is called once per iteration — stateless,
+# short-lived — only to freeze params / narrow ranges. The README is never
+# re-read and context never accumulates across iterations.
+# Runs headless in the background. Run `make run-stock` first.
+#   Tunables: MAX_ITER (default 10), CLAUDE_MODEL (default sonnet).
 claude-optimize:
-	@echo "Claude bat dau iterative optimization..."
+	@echo "Iterative optimization (bash-orchestrated)..."
 	@mkdir -p stock-analytics/output
-	@nohup claude -p --permission-mode acceptEdits "Read stock-analytics/README_WYCKOFF_OPTIMIZED.md Section 9 for the full strategy. Read stock-analytics/crawler/wyckoff_opt.py for DEFAULT_PARAMS and FIXED_PARAMS. Read stock-analytics/crawler/optimizer.py for TUNE_PARAMS and Optuna setup. Do this iterative loop (max 10 iterations): ITERATION START: 1. Run: make backtest-quick 2. Read stock-analytics/output/backtest_result.json 3. Analyze: - annual_return < 20% -> loosen entry (lower rsi_entry_max, lower min_signal_score) - max_drawdown > 25% -> tighten stops (raise atr_stop_mult, lower atr_trail_pct) - win_rate < 55% -> tighten entry (raise min_signal_score, lower rsi_entry_max) - 2022 return < -5% -> lower downtrend_drawdown_pct (detect downtrend earlier) - indicator IC < 0.02 -> note which indicators are weak (do not remove yet) 4. Decide which params to FREEZE (move from TUNE_PARAMS to FIXED_PARAMS) 5. Narrow the range of remaining TUNE_PARAMS 6. Edit stock-analytics/crawler/wyckoff_opt.py and stock-analytics/crawler/optimizer.py with changes 7. Append to stock-analytics/output/optimization_log.md: iteration number, changes made, reason, results 8. REPEAT from step 1 STOP when: annual_return >= 20% AND max_drawdown <= 25% AND win_rate >= 55% AND sharpe >= 1.0 OR after 10 iterations. Write final summary to stock-analytics/output/optimization_log.md with best params found." > stock-analytics/output/claude_optimize.log 2>&1 & echo "Claude dang chay PID: $$!"
+	@nohup bash stock-analytics/scripts/optimize_loop.sh > stock-analytics/output/claude_optimize.log 2>&1 & echo "Loop dang chay PID: $$!"
 	@echo "Xem tien trinh : tail -f stock-analytics/output/claude_optimize.log"
 	@echo "Xem ket qua    : tail -f stock-analytics/output/optimization_log.md"
+
+# Single-iteration test run (foreground): 1 backtest → 1 Claude adjustment → edit.
+# Use it to verify the whole pipeline end-to-end before launching the full loop.
+claude-optimize-quick:
+	@echo "Test 1 vong (backtest -> claude -> edit), chay foreground..."
+	@mkdir -p stock-analytics/output
+	@MAX_ITER=1 QUICK_TEST=1 bash stock-analytics/scripts/optimize_loop.sh
 
 # ── Frontend (dev only) ───────────────────────────────────────────────────
 

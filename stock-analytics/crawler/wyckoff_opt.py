@@ -45,6 +45,10 @@ DEFAULT_PARAMS: dict = {
     # ATR stop
     "atr_stop_mult":          2.0,
     "atr_trail_pct":          0.85,
+    # Profit-lock exit — once peak gain ≥ arm_pct·entry, give back at most
+    # giveback_pct of that peak gain before exiting. arm_pct fixed; giveback tuned.
+    "profit_lock_arm_pct":    0.06,
+    "profit_giveback_pct":    0.40,
     # Bollinger squeeze
     "bb_squeeze_thresh":      0.05,
     # Entry quality
@@ -91,6 +95,7 @@ TUNE_PARAMS: dict = {
     # Risk management
     "atr_stop_mult":          [1.5, 2.0, 2.5, 3.0],
     "atr_trail_pct":          [0.80, 0.85, 0.90],
+    "profit_giveback_pct":    [0.30, 0.40, 0.50, 0.60],
     # Market filters
     "top_n_sectors":          [2, 3, 4],
     "downtrend_drawdown_pct": [0.08, 0.10, 0.12],
@@ -130,6 +135,10 @@ class OptSignal:
     regime:       Optional[str]  = None
     indicators:   dict           = field(default_factory=dict)
     reasons:      list[str]      = field(default_factory=list)
+    # Pass-through from the base Wyckoff analysis (for UI display, e.g. Buy Now)
+    resistance:      Optional[float] = None
+    signal_strength: str             = ""
+    description:     str             = ""
 
 
 # ── Indicator series ──────────────────────────────────────────────────────────
@@ -338,28 +347,44 @@ def compute_signal_score(wyckoff_result, ind: dict, params: Optional[dict] = Non
 def compute_trailing_stop(entry_price: float, current_price: float,
                           atr_at_entry: float, running_max: float,
                           params: Optional[dict] = None) -> float:
-    """ATR-based trailing stop that only ratchets up.
+    """ATR-based trailing stop + profit-lock, both ratchet up only.
 
-    trailing_stop = max(entry − atr_stop_mult·ATR_at_entry,
-                        running_max · atr_trail_pct)
+    trailing_stop = max(entry − atr_stop_mult·ATR_at_entry,    # catastrophic floor
+                        running_max · atr_trail_pct,           # ATR trail from peak
+                        profit_lock)                           # give back ≤ x% of gain
+
+    profit_lock arms once the peak gain clears ``profit_lock_arm_pct``·entry; from
+    then on it never lets price give back more than ``profit_giveback_pct`` of the
+    peak unrealised gain. Whichever level is highest (tightest) wins.
     """
     p = merge_params(params)
     atr_floor = entry_price - p["atr_stop_mult"] * atr_at_entry
     trail = max(running_max, current_price) * p["atr_trail_pct"]
-    return max(atr_floor, trail)
+    stop = max(atr_floor, trail)
+
+    peak_gain = running_max - entry_price
+    if peak_gain >= p["profit_lock_arm_pct"] * entry_price:
+        lock = entry_price + (1.0 - p["profit_giveback_pct"]) * peak_gain
+        stop = max(stop, lock)
+    return stop
 
 
 # ── Live signal ───────────────────────────────────────────────────────────────
 
 def run_live_signal(symbol: str, bars: list[dict], index_bars: list[dict] | None = None,
-                    params: Optional[dict] = None, regime: str | None = None) -> OptSignal:
+                    params: Optional[dict] = None, regime: str | None = None,
+                    base=None) -> OptSignal:
     """Optimized live signal for one symbol using ``params`` (regime-specific).
 
     Calls the base Wyckoff analysis, layers the confirmation indicators on top,
     and gates the BUY on the signal score and the current regime.
+
+    ``base`` — an already-computed Wyckoff analysis for this symbol; pass it to
+    skip recomputing ``_wy.analyze`` when the caller already has one.
     """
     p = merge_params(params)
-    base = _wy.analyze(symbol, bars, lookback=p["lookback"])
+    if base is None:
+        base = _wy.analyze(symbol, bars, lookback=p["lookback"])
     ind  = compute_indicators(bars, index_bars, p)
     score = compute_signal_score(base, ind, p)
 
@@ -413,6 +438,9 @@ def run_live_signal(symbol: str, bars: list[dict], index_bars: list[dict] | None
             "atr": _r(atr_last),
         },
         reasons=reasons,
+        resistance=base.resistance,
+        signal_strength=base.signal_strength,
+        description=base.description,
     )
 
 

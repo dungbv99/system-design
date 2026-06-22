@@ -356,15 +356,41 @@ class Crawler:
             log.warning("compute_wyckoff: no symbols found")
             return
 
-        log.info("wyckoff: analysing %d symbols", len(symbols))
+        # Load the optimized params for the current market regime ONCE — every
+        # symbol this run is scored with the same regime-specific param set, so
+        # wyckoff_signals reflects the optimized model (README §9). Falls back to
+        # DEFAULT_PARAMS when no backtest has stored params yet.
+        import wyckoff_opt
+        reg_row    = self.store.get_regime()
+        regime     = reg_row["regime"] if reg_row else None
+        params     = self.store.get_optimized_params(regime)
+        lookback   = int(params.get("lookback", 260))
+        index_bars = self.store.get_symbol_quotes("VNINDEX", days=400) or None
+
+        log.info("wyckoff: analysing %d symbols with optimized params (regime=%s)",
+                 len(symbols), regime or "n/a")
         done = errors = 0
 
         def analyse_one(sym: str) -> tuple[str, str | None]:
             try:
-                bars = self.store.get_symbol_quotes(sym, days=300)
+                bars = self.store.get_symbol_quotes(sym, days=400)
                 if not bars:
                     return sym, "no data"
-                analysis = wyckoff_engine.analyze(sym, bars, lookback=260)
+                # Full descriptive record from the base engine, computed once …
+                analysis = wyckoff_engine.analyze(sym, bars, lookback=lookback)
+                # … then reused to overlay the optimized BUY/WAIT decision +
+                # entry/stop so the stored signal matches the backtested model.
+                opt = wyckoff_opt.run_live_signal(sym, bars, index_bars, params,
+                                                  regime, base=analysis)
+                analysis.signal      = opt.signal
+                analysis.entry_price = opt.entry_price
+                analysis.stop_loss   = opt.stop_loss
+                if (analysis.target is not None and analysis.entry_price
+                        and analysis.stop_loss is not None
+                        and analysis.entry_price > analysis.stop_loss):
+                    analysis.rr_ratio = round(
+                        (analysis.target - analysis.entry_price)
+                        / (analysis.entry_price - analysis.stop_loss), 2)
                 self.store.upsert_wyckoff_signal(analysis)
                 return sym, None
             except Exception as e:
