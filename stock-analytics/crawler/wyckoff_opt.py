@@ -304,10 +304,12 @@ def compute_signal_score(wyckoff_result, ind: dict, params: Optional[dict] = Non
     See README §3 and §15.
     """
     p = merge_params(params)
+    phase = getattr(wyckoff_result, "phase", "")
     bullish_base = (
         getattr(wyckoff_result, "signal", "WAIT") == "BUY"
-        or (getattr(wyckoff_result, "phase", "") == "Accumulation"
+        or (phase == "Accumulation"
             and getattr(wyckoff_result, "sub_phase", "") in ("C", "D"))
+        or phase == "Markup"          # established uptrend — score it on momentum (buy strength)
     )
     if not bullish_base:
         return 0
