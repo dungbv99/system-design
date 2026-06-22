@@ -32,7 +32,8 @@ services:
       CRAWL_MINUTE: "0"
       RATE_LIMIT_MS: "100"   # delay between per-symbol API calls
       WORKERS: "5"           # concurrent symbol fetches
-      OPTUNA_PROCS: "${OPTUNA_PROCS:-7}"   # Optuna worker PROCESSES — 7 cores (1 left free on an 8-core box)
+      OPTUNA_PROCS: "${OPTUNA_PROCS:-1}"   # 1 = single-process (KEEPS the regime cache; fastest here).
+                                            # >1 forks workers but breaks the per-ctx regime memoization — slower.
       RUN_NOW: "0"           # set to "1" to trigger an immediate crawl on startup
       API_PORT: "8090"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"            # for quarterly-report analysis (aistudio.google.com)

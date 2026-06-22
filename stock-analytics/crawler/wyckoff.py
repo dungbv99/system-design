@@ -817,8 +817,11 @@ def _r(v: Optional[float]) -> Optional[float]:
 
 
 def _mean(iterable) -> float:
+    # Plain arithmetic mean. statistics.mean() uses exact rational arithmetic
+    # (Fraction/as_integer_ratio) and is ~100x slower — it dominated the backtest
+    # profile (get_regime_series → _sma → _mean). sum/len is what we actually want.
     items = list(iterable)
-    return statistics.mean(items) if items else 0.0
+    return sum(items) / len(items) if items else 0.0
 
 
 def _sma(values: list[float], period: int) -> list[float]:
