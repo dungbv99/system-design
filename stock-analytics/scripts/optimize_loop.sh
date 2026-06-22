@@ -190,9 +190,9 @@ for ((i=1; i<=MAX_ITER; i++)); do
         break
     fi
 
-    printf -v summary "annual=%.1f%%  sharpe=%.2f  maxDD=%.1f%%  win=%.1f%%  2022=%.1f%%" \
-        "$(echo "$ANNUAL*100" | bc -l)" "$SHARPE" "$(echo "$MAXDD*100" | bc -l)" \
-        "$(echo "$WINRATE*100" | bc -l)" "$RET2022"
+    # Format with awk (always present; bc is not installed in the slim image).
+    summary="$(awk -v a="$ANNUAL" -v s="$SHARPE" -v d="$MAXDD" -v w="$WINRATE" -v y="$RET2022" \
+        'BEGIN{printf "annual=%.1f%%  sharpe=%.2f  maxDD=%.1f%%  win=%.1f%%  2022=%.1f%%", a*100, s, d*100, w*100, y}')"
     log "   $summary  (best_so_far=${IS_BEST})"
 
     # Deterministic results block in the human log.
