@@ -157,12 +157,13 @@ claude-optimize:
 	@echo "Xem tien trinh : tail -f stock-analytics/output/claude_optimize.log"
 	@echo "Xem ket qua    : tail -f stock-analytics/output/optimization_log.md"
 
-# Single-iteration test run (foreground): 1 backtest → 1 Claude adjustment → edit.
+# Single-iteration test run (background, nohup): 1 backtest → 1 Claude adjustment → edit.
 # Use it to verify the whole pipeline end-to-end before launching the full loop.
 claude-optimize-quick:
-	@echo "Test 1 vong (backtest -> claude -> edit), chay foreground..."
+	@echo "Test 1 vong (backtest -> claude -> edit), chay nen (nohup)..."
 	@mkdir -p stock-analytics/output
-	@MAX_ITER=1 QUICK_TEST=1 bash stock-analytics/scripts/optimize_loop.sh
+	@MAX_ITER=1 QUICK_TEST=1 nohup bash stock-analytics/scripts/optimize_loop.sh > stock-analytics/output/claude_optimize_quick.log 2>&1 & echo "Quick test dang chay PID: $$!"
+	@echo "Xem tien trinh : tail -f stock-analytics/output/claude_optimize_quick.log"
 
 # ── Frontend (dev only) ───────────────────────────────────────────────────
 
