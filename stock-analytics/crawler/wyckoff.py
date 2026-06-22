@@ -938,12 +938,13 @@ def _resample(bars: list[dict], freq: str) -> list[dict]:
         date_str = str(b.get("date", ""))
         if not date_str:
             continue
-        try:
-            dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
-        except ValueError:
-            continue
         if freq == "W":
-            iso = dt.isocalendar()
+            # fromisoformat is a fast C parser; strptime was ~1M slow calls in
+            # the precompute profile. Monthly needs no parsing at all.
+            try:
+                iso = datetime.fromisoformat(date_str[:10]).isocalendar()
+            except ValueError:
+                continue
             key = f"{iso[0]}-W{iso[1]:02d}"
         else:
             key = date_str[:7]
@@ -982,8 +983,14 @@ def _bollinger(
         window = [c for c in closes[i - period + 1 : i + 1] if c > 0]
         if not window:
             continue
-        m = statistics.mean(window)
-        s = statistics.stdev(window) if len(window) > 1 else 0.0
+        # Manual mean + sample stdev (statistics.* uses exact rational math and
+        # dominated the precompute profile via this sliding window).
+        m = sum(window) / len(window)
+        if len(window) > 1:
+            var = sum((x - m) * (x - m) for x in window) / (len(window) - 1)
+            s = var ** 0.5
+        else:
+            s = 0.0
         middle[i] = m
         upper[i]  = m + std_dev * s
         lower[i]  = m - std_dev * s
