@@ -1,282 +1,189 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { WyckoffSignal } from '../types'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { fmtPrice } from '../utils'
 import { ExchangeBadge } from '../components/ui'
 import { SymbolModal } from '../components/SymbolModal'
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Types ───────────────────────────────────────────────────────────────────
+
+interface BuyRow {
+  symbol: string
+  name: string | null
+  exchange: string | null
+  signal: string            // BUY | HOLD
+  score: number
+  phase: string
+  sub_phase: string
+  current_price: number | null
+  entry_price: number | null
+  stop_loss: number | null
+  resistance: number | null
+  rsi: number | null
+  rs: number | null
+  atr: number | null
+  gap_pct: number | null
+  rr: number | null
+  description: string
+}
+
+interface BuyNowResp {
+  regime: string
+  min_score: number
+  buyable: BuyRow[]
+  watch: BuyRow[]
+}
 
 const PHASE_COLOR: Record<string, string> = {
   Accumulation: 'text-cyan-400',
-  Distribution: 'text-orange-400',
   Markup:       'text-emerald-400',
+  Distribution: 'text-orange-400',
   Markdown:     'text-red-400',
   Unknown:      'text-[#8b949e]',
 }
 
-const STRENGTH_META: Record<string, { dot: string; label: string; text: string }> = {
-  STRONG:   { dot: 'bg-emerald-400', label: 'Strong',   text: 'text-emerald-300' },
-  MODERATE: { dot: 'bg-amber-400',   label: 'Moderate', text: 'text-amber-300'   },
-  WEAK:     { dot: 'bg-[#8b949e]',   label: 'Weak',     text: 'text-[#8b949e]'  },
-}
+const regimeStyle = (r: string): string =>
+  r === 'UPTREND'   ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+  : r === 'DOWNTREND' ? 'bg-red-950 text-red-300 border-red-700'
+  : 'bg-amber-950 text-amber-300 border-amber-700'
 
-const STRENGTH_RANK: Record<string, number> = { STRONG: 0, MODERATE: 1, WEAK: 2 }
-
-// Threshold presets — "how close to the best-buy price is close enough"
-const THRESHOLDS = [0.5, 1, 2, 3] as const
-
-interface BuyRow extends WyckoffSignal {
-  gapPct: number   // (current - entry) / entry × 100  (negative = below best buy)
-  rr:     number | null
-}
-
-function PhaseLabel({ phase, sub }: { phase: string; sub: string }) {
-  const color = PHASE_COLOR[phase] ?? 'text-[#8b949e]'
+function SignalBadge({ signal }: { signal: string }) {
+  // BUY = Wyckoff accumulation breakout; HOLD = established Markup uptrend
+  const buy = signal === 'BUY'
   return (
-    <span className={`font-semibold ${color}`}>
-      {phase} {sub !== '-' && <span className="font-bold">·{sub}</span>}
+    <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded border ${
+      buy ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+          : 'bg-cyan-950 text-cyan-300 border-cyan-700'}`}>
+      {buy ? 'BUY' : 'UPTREND'}
     </span>
   )
 }
 
-function StrengthBadge({ strength }: { strength: string }) {
-  const s = STRENGTH_META[strength] ?? STRENGTH_META.WEAK
+function ScoreDot({ score, min }: { score: number; min: number }) {
+  const ok = score >= min
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-bold ${s.text}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
-      {s.label}
+    <span className={`font-bold tabular-nums ${ok ? 'text-emerald-300' : 'text-amber-300'}`}>
+      {score}/8
     </span>
   )
 }
 
-/** Signed gap badge. Below best-buy (cheaper) = green; at/above = amber. */
-function GapBadge({ gapPct }: { gapPct: number }) {
-  const below = gapPct <= 0
-  const sign  = gapPct > 0 ? '+' : gapPct < 0 ? '−' : ''
-  const abs   = Math.abs(gapPct)
+// ── Rows table ──────────────────────────────────────────────────────────────
+
+function BuyTable({ rows, min, onPick }: {
+  rows: BuyRow[]; min: number; onPick: (r: BuyRow) => void
+}) {
+  if (rows.length === 0)
+    return <div className="px-4 py-8 text-center text-[#6e7681] text-sm">No symbols here right now.</div>
+
   return (
-    <span className={`font-bold text-xs px-1.5 py-0.5 rounded tabular-nums ${
-      below ? 'text-emerald-300 bg-emerald-950/60' : 'text-amber-300 bg-amber-950/60'
-    }`}>
-      {sign}{abs.toFixed(2)}%
-    </span>
+    <div className="overflow-x-auto rounded-lg border border-[#30363d]">
+      <table className="w-full text-xs">
+        <thead className="text-[#8b949e] uppercase tracking-wider text-[11px]">
+          <tr>
+            {['Symbol', 'Company', 'Exch', 'Signal', 'Phase', 'Score', 'Price (K₫)',
+              'Entry', 'Gap', 'Stop', 'Target', 'R:R'].map(h => (
+              <th key={h} className="px-3 py-3 text-left font-semibold sticky top-0 bg-[#161b22]">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.symbol}
+              className={`border-t border-[#30363d]/50 cursor-pointer hover:bg-[#21262d] ${i % 2 ? 'bg-[#161b22]/30' : ''}`}
+              onClick={() => onPick(r)}>
+              <td className="px-3 py-2.5 font-bold text-emerald-400 tracking-wide">{r.symbol}</td>
+              <td className="px-3 py-2.5 max-w-[150px]"><span className="text-[#e6edf3] truncate block" title={r.name ?? ''}>{r.name ?? '—'}</span></td>
+              <td className="px-3 py-2.5"><ExchangeBadge exchange={r.exchange ?? ''} /></td>
+              <td className="px-3 py-2.5"><SignalBadge signal={r.signal} /></td>
+              <td className={`px-3 py-2.5 font-semibold ${PHASE_COLOR[r.phase] ?? 'text-[#8b949e]'}`}>
+                {r.phase}{r.sub_phase && r.sub_phase !== '-' ? `·${r.sub_phase}` : ''}
+              </td>
+              <td className="px-3 py-2.5"><ScoreDot score={r.score} min={min} /></td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-[#e6edf3]">{r.current_price != null ? fmtPrice(r.current_price) : '—'}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-emerald-300">{r.entry_price != null ? fmtPrice(r.entry_price) : '—'}</td>
+              <td className={`px-3 py-2.5 text-right tabular-nums ${r.gap_pct != null && r.gap_pct <= 0 ? 'text-emerald-300' : 'text-amber-300'}`}>
+                {r.gap_pct != null ? `${r.gap_pct > 0 ? '+' : ''}${r.gap_pct.toFixed(1)}%` : '—'}
+              </td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-red-300/90">{r.stop_loss != null ? fmtPrice(r.stop_loss) : '—'}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums text-red-400/80">{r.resistance != null ? fmtPrice(r.resistance) : '—'}</td>
+              <td className="px-3 py-2.5 text-right tabular-nums">
+                {r.rr != null ? <span className={`font-bold ${r.rr >= 2 ? 'text-emerald-300' : 'text-[#8b949e]'}`}>1:{r.rr.toFixed(1)}</span> : '—'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 
 export function BuyNowTab() {
-  const [signals,   setSignals]   = useState<WyckoffSignal[] | null>(null)
-  const [loading,   setLoading]   = useState(false)
-  const [maxGap,    setMaxGap]    = useState<number>(1)        // percent
-  const [strongOnly, setStrongOnly] = useState(false)
-  const [detail,    setDetail]    = useState<{ symbol: string; name: string } | null>(null)
+  const [data, setData]       = useState<BuyNowResp | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [detail, setDetail]   = useState<{ symbol: string; name: string } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
-    try {
-      const page = await api.wyckoffSignals('BUY', '', 2000)
-      setSignals(page.items)
-    } finally {
-      setLoading(false)
-    }
+    try { setData(await api.buyNow()) }
+    finally { setLoading(false) }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
-  // Build, filter (current price within maxGap% of best-buy entry), and sort.
-  const rows: BuyRow[] = useMemo(() => {
-    if (!signals) return []
-    const out: BuyRow[] = []
-    for (const s of signals) {
-      if (s.entry_price == null || s.current_price == null || s.entry_price <= 0) continue
-      if (strongOnly && s.signal_strength !== 'STRONG') continue
-      const gapPct = ((s.current_price - s.entry_price) / s.entry_price) * 100
-      if (Math.abs(gapPct) > maxGap) continue
-      const rr = (s.stop_loss != null && s.resistance != null && s.entry_price > s.stop_loss)
-        ? (s.resistance - s.entry_price) / (s.entry_price - s.stop_loss)
-        : null
-      out.push({ ...s, gapPct, rr })
-    }
-    // Closest to entry first; STRONG before MODERATE on ties.
-    out.sort((a, b) => {
-      const r = (STRENGTH_RANK[a.signal_strength] ?? 9) - (STRENGTH_RANK[b.signal_strength] ?? 9)
-      if (r !== 0) return r
-      return Math.abs(a.gapPct) - Math.abs(b.gapPct)
-    })
-    return out
-  }, [signals, maxGap, strongOnly])
-
-  const strongCount = rows.filter(r => r.signal_strength === 'STRONG').length
+  const pick = (r: BuyRow) => setDetail({ symbol: r.symbol, name: r.name ?? r.symbol })
 
   return (
-    <div className="space-y-4">
-
-      {/* ── Heading ────────────────────────────────────────────────────────── */}
+    <div className="p-4 space-y-5">
+      {/* Heading */}
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <h2 className="text-base font-bold text-emerald-400 flex items-center gap-2">
-            🎯 Buy Now
-          </h2>
-          <p className="text-xs text-[#8b949e] mt-1 max-w-xl">
-            Wyckoff <span className="text-emerald-300 font-semibold">BUY</span> setups where the
-            current price is within <span className="text-emerald-300 font-semibold">{maxGap}%</span> of
-            the best-buy entry — i.e. you can act at (or near) the ideal price right now.
+          <h2 className="text-base font-bold text-emerald-400">🎯 Buy Now</h2>
+          <p className="text-xs text-[#8b949e] mt-1 max-w-2xl">
+            Mã mà <span className="text-emerald-300 font-semibold">mô hình Wyckoff tối ưu</span> sẽ vào lệnh —
+            gồm breakout tích lũy (BUY) và xu hướng tăng đã xác nhận (UPTREND/HOLD).
+            {data && <> Regime hiện tại: <span className={`px-1.5 py-0.5 rounded border ${regimeStyle(data.regime)}`}>{data.regime}</span>
+              {' '}· ngưỡng điểm ≥ <span className="text-emerald-300 font-semibold">{data.min_score}</span></>}
           </p>
         </div>
-        <button
-          onClick={load}
-          disabled={loading}
-          className={`self-start px-4 py-2 rounded-lg text-xs font-bold border transition-all
-            ${loading
-              ? 'bg-cyan-950 border-cyan-700 text-cyan-300 animate-pulse cursor-not-allowed'
-              : 'bg-[#21262d] border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}
-        >
-          {loading ? '⏳ Loading…' : '⟳ Reload'}
+        <button onClick={load} disabled={loading}
+          className={`self-start px-4 py-2 rounded-lg text-xs font-bold border transition-all ${
+            loading ? 'bg-cyan-950 border-cyan-700 text-cyan-300 animate-pulse cursor-not-allowed'
+                    : 'bg-[#21262d] border-[#30363d] text-[#8b949e] hover:border-[#58a6ff]/50 hover:text-[#e6edf3]'}`}>
+          {loading ? '⏳ Đang quét VN100…' : '⟳ Quét lại'}
         </button>
       </div>
 
-      {/* ── Controls ───────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <span className="text-xs text-[#8b949e] font-semibold">Max gap from best buy:</span>
-        <div className="flex gap-1">
-          {THRESHOLDS.map(t => (
-            <button key={t} onClick={() => setMaxGap(t)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all tabular-nums
-                ${maxGap === t
-                  ? 'bg-[#21262d] border-[#58a6ff] text-[#58a6ff]'
-                  : 'border-[#30363d] text-[#8b949e] hover:text-[#e6edf3] hover:border-[#8b949e]/50'}`}>
-              ≤ {t}%
-            </button>
-          ))}
-        </div>
-        <div className="h-4 w-px bg-[#30363d]" />
-        <button onClick={() => setStrongOnly(v => !v)}
-          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
-            ${strongOnly
-              ? 'bg-emerald-950 border-emerald-600 text-emerald-300'
-              : 'border-[#30363d] text-[#8b949e] hover:text-[#e6edf3] hover:border-[#8b949e]/50'}`}>
-          {strongOnly ? '● ' : '○ '}Strong only
-        </button>
-        <span className="text-xs text-[#8b949e] ml-auto tabular-nums">
-          {rows.length} buyable
-          {!strongOnly && strongCount > 0 && (
-            <span className="text-emerald-300"> · {strongCount} strong</span>
-          )}
-        </span>
-      </div>
+      {loading && <div className="text-center py-12 text-[#8b949e] text-sm animate-pulse">Đang quét 100 mã VN100 theo mô hình hiện tại…</div>}
 
-      {/* ── Table ──────────────────────────────────────────────────────────── */}
-      {loading && (
-        <div className="text-center py-12 text-[#8b949e] text-sm animate-pulse">Loading buy signals…</div>
+      {!loading && data && (
+        <>
+          {/* Buyable now */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-bold text-emerald-300">🎯 Mua được ngay</h3>
+              <span className="text-xs text-[#8b949e]">({data.buyable.length}) — đủ điều kiện vào lệnh: score ≥ {data.min_score}</span>
+            </div>
+            <BuyTable rows={data.buyable} min={data.min_score} onPick={pick} />
+          </div>
+
+          {/* Approaching */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-bold text-amber-300">👀 Sắp mua</h3>
+              <span className="text-xs text-[#8b949e]">({data.watch.length}) — còn 1-2 xác nhận (score {data.min_score - 2}–{data.min_score - 1})</span>
+            </div>
+            <BuyTable rows={data.watch} min={data.min_score} onPick={pick} />
+          </div>
+
+          <p className="text-xs text-[#8b949e]/40 text-right">
+            Quét trực tiếp VN100 bằng params tối ưu của regime hiện tại · không phải khuyến nghị đầu tư
+          </p>
+        </>
       )}
 
-      {!loading && (
-        <div className="overflow-x-auto rounded-lg border border-[#30363d]">
-          <table className="w-full text-xs">
-            <thead className="text-[#8b949e] uppercase tracking-wider text-[11px]">
-              <tr>
-                <th className="px-3 py-3 text-left   font-semibold sticky top-0 z-10 bg-[#161b22]">Symbol</th>
-                <th className="px-3 py-3 text-left   font-semibold sticky top-0 z-10 bg-[#161b22]">Company</th>
-                <th className="px-3 py-3 text-center font-semibold sticky top-0 z-10 bg-[#161b22]">Exch</th>
-                <th className="px-3 py-3 text-left   font-semibold sticky top-0 z-10 bg-[#161b22]">Phase</th>
-                <th className="px-3 py-3 text-center font-semibold sticky top-0 z-10 bg-[#161b22]">Strength</th>
-                <th className="px-3 py-3 text-right  font-semibold sticky top-0 z-10 bg-[#161b22]">Price (K₫)</th>
-                <th className="px-3 py-3 text-right  font-semibold sticky top-0 z-10 bg-[#161b22] text-emerald-400">▶ Best Buy</th>
-                <th className="px-3 py-3 text-right  font-semibold sticky top-0 z-10 bg-[#161b22] text-amber-400">Gap</th>
-                <th className="px-3 py-3 text-right  font-semibold sticky top-0 z-10 bg-[#161b22] text-red-400">✕ Stop</th>
-                <th className="px-3 py-3 text-right  font-semibold sticky top-0 z-10 bg-[#161b22]">Target</th>
-                <th className="px-3 py-3 text-right  font-semibold sticky top-0 z-10 bg-[#161b22] text-amber-400">R:R</th>
-                <th className="px-3 py-3 text-left   font-semibold sticky top-0 z-10 bg-[#161b22]">Setup</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
-                <tr>
-                  <td colSpan={12} className="px-4 py-10 text-center text-[#8b949e]">
-                    No BUY setups within {maxGap}% of their best-buy price right now.
-                    Try a wider gap or run <span className="text-[#58a6ff]">Refresh Analysis</span> on the Wyckoff tab.
-                  </td>
-                </tr>
-              )}
-              {rows.map((row, i) => (
-                <tr
-                  key={row.symbol}
-                  className={`border-t border-[#30363d]/50 cursor-pointer transition-all
-                    hover:bg-[#21262d] hover:ring-1 hover:ring-inset hover:ring-[#58a6ff]/20
-                    ${i % 2 === 0 ? '' : 'bg-[#161b22]/30'}`}
-                  style={{ borderLeft: '4px solid #34d399' }}
-                  onClick={() => setDetail({ symbol: row.symbol, name: row.name ?? row.symbol })}
-                >
-                  <td className="px-3 py-2.5">
-                    <span className="font-bold text-emerald-400 tracking-wide">{row.symbol}</span>
-                  </td>
-                  <td className="px-3 py-2.5 max-w-[150px]">
-                    <span className="text-[#e6edf3] truncate block" title={row.name}>{row.name ?? '—'}</span>
-                  </td>
-                  <td className="px-3 py-2.5 text-center">
-                    <ExchangeBadge exchange={row.exchange ?? ''} />
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <PhaseLabel phase={row.phase} sub={row.sub_phase} />
-                  </td>
-                  <td className="px-3 py-2.5 text-center">
-                    <StrengthBadge strength={row.signal_strength} />
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-medium text-[#e6edf3] tabular-nums">
-                    {fmtPrice(row.current_price!)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums">
-                    <span className="font-bold text-emerald-300 bg-emerald-950/60 px-1.5 py-0.5 rounded">
-                      {fmtPrice(row.entry_price!)}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5 text-right">
-                    <GapBadge gapPct={row.gapPct} />
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums">
-                    {row.stop_loss != null
-                      ? <span className="font-medium text-red-300/90">{fmtPrice(row.stop_loss)}</span>
-                      : <span className="text-[#8b949e]">—</span>}
-                  </td>
-                  <td className="px-3 py-2.5 text-right text-red-400/80 tabular-nums">
-                    {row.resistance != null ? fmtPrice(row.resistance) : '—'}
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums">
-                    {row.rr != null ? (
-                      <span className={`font-bold text-xs px-1.5 py-0.5 rounded ${
-                        row.rr >= 3 ? 'text-emerald-300 bg-emerald-950/60' :
-                        row.rr >= 2 ? 'text-amber-300 bg-amber-950/60' :
-                                      'text-[#8b949e]'
-                      }`}>
-                        1:{row.rr.toFixed(1)}
-                      </span>
-                    ) : <span className="text-[#8b949e]">—</span>}
-                  </td>
-                  <td className="px-3 py-2.5 max-w-[260px]">
-                    <span className="text-[#8b949e] truncate block text-[11px]" title={row.description}>
-                      {row.description}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <p className="text-xs text-[#8b949e]/40 text-right">
-        Buyable = Wyckoff BUY with current price within the chosen gap of best-buy entry · not financial advice
-      </p>
-
-      {detail && (
-        <SymbolModal
-          symbol={detail.symbol}
-          name={detail.name}
-          onClose={() => setDetail(null)}
-        />
-      )}
+      {detail && <SymbolModal symbol={detail.symbol} name={detail.name} onClose={() => setDetail(null)} />}
     </div>
   )
 }

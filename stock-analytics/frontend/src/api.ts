@@ -227,6 +227,8 @@ export const api = {
       .then(r => r.json()),
   wyckoffSignal: (symbol: string): Promise<WyckoffSignal> =>
     fetch(`/api/symbols/${encodeURIComponent(symbol)}/wyckoff`).then(r => r.json()),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  buyNow: (): Promise<any> => fetch('/api/buy-now').then(r => r.json()),
   computeWyckoff: (exchanges = 'all'): Promise<{ message: string; exchanges: string[] | string }> =>
     fetch(`/api/wyckoff/compute?exchanges=${encodeURIComponent(exchanges)}`, { method: 'POST' })
       .then(r => r.json()),

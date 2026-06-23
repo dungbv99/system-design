@@ -944,6 +944,17 @@ class Store:
         import sector_rotation
         return list(sector_rotation.VN100)
 
+    def get_symbols_meta(self, symbols: list[str]) -> dict:
+        """Map symbol → {name, exchange} for the given symbols (for UI rows)."""
+        if not symbols:
+            return {}
+        with self._read() as cur:
+            cur.execute(
+                "SELECT symbol, name, exchange FROM symbols WHERE symbol = ANY(%s)",
+                (list(symbols),),
+            )
+            return {r[0]: {"name": r[1], "exchange": r[2]} for r in cur.fetchall()}
+
     def mark_vn100(self, symbols: list[str]) -> int:
         with self._cursor() as cur:
             cur.execute("ALTER TABLE symbols ADD COLUMN IF NOT EXISTS is_vn100 BOOLEAN DEFAULT FALSE")

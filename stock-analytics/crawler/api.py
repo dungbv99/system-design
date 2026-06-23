@@ -613,6 +613,56 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         sig = wyckoff_opt.run_live_signal(sym, bars, index_bars or None, params, regime)
         return dataclasses.asdict(sig)
 
+    @app.get("/api/buy-now")
+    def buy_now():
+        """Scan VN100 with the CURRENT optimized model and split into:
+          - buyable: the strategy would enter now (signal BUY/HOLD, score >= min)
+          - watch:   1-2 confirmations away (signal BUY/HOLD, min-2 <= score < min)
+        Markup uptrends (signal HOLD) are included — matching the backtest entry rule.
+        """
+        import wyckoff_opt
+        store.ensure_wyckoff_opt_tables()
+        reg_row = store.get_regime()
+        regime = reg_row["regime"] if reg_row else None
+        params = store.get_optimized_params(regime) if regime else dict(wyckoff_opt.DEFAULT_PARAMS)
+        min_score = int(params.get("min_signal_score", 4))
+
+        symbols = store.get_vn100_symbols()
+        meta = store.get_symbols_meta(symbols)
+        index_bars = store.get_symbol_quotes("VNINDEX", days=400) or None
+
+        buyable, watch = [], []
+        for sym in symbols:
+            bars = store.get_symbol_quotes(sym, days=400)
+            if not bars:
+                continue
+            try:
+                s = wyckoff_opt.run_live_signal(sym, bars, index_bars, params, regime)
+            except Exception:  # noqa: BLE001
+                continue
+            if s.signal not in ("BUY", "HOLD") or s.score < min_score - 2:
+                continue
+            m = meta.get(sym, {})
+            entry = s.entry_price or s.current_price
+            gap = ((s.current_price - entry) / entry * 100) if (entry and s.current_price) else None
+            rr = ((s.resistance - entry) / (entry - s.stop_loss)
+                  if s.resistance and s.stop_loss and entry and entry > s.stop_loss else None)
+            row = {
+                "symbol": sym, "name": m.get("name"), "exchange": m.get("exchange"),
+                "signal": s.signal, "score": s.score, "phase": s.phase, "sub_phase": s.sub_phase,
+                "current_price": s.current_price, "entry_price": entry, "stop_loss": s.stop_loss,
+                "resistance": s.resistance, "rsi": s.rsi, "rs": s.rs, "atr": s.atr,
+                "gap_pct": round(gap, 2) if gap is not None else None,
+                "rr": round(rr, 1) if rr is not None else None,
+                "description": s.description,
+            }
+            (buyable if s.score >= min_score else watch).append(row)
+
+        buyable.sort(key=lambda r: r["score"], reverse=True)
+        watch.sort(key=lambda r: r["score"], reverse=True)
+        return {"regime": regime or "n/a", "min_score": min_score,
+                "buyable": buyable, "watch": watch}
+
     # ── Backtest (single-symbol Wyckoff walk-forward) ─────────────────────────
 
     @app.get("/api/backtest/{symbol}")
