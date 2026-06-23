@@ -436,12 +436,21 @@ def run_live_signal(symbol: str, bars: list[dict], index_bars: list[dict] | None
             reasons.append(f"BUY confirmed (score {score})")
 
     atr_last  = ind["atr_last"]
-    entry     = base.current_price
-    stop_loss = base.stop_loss
-    # BUY (breakout) and HOLD (markup uptrend) are both entries the strategy takes,
-    # so give both an entry (current price) + ATR stop — Wyckoff's base only sets
-    # these for accumulation breakouts, leaving markup entries with no levels.
+    cur_px    = base.current_price
     enterable = signal in ("BUY", "HOLD")
+    # Best-buy level:
+    #   HOLD (markup uptrend) → ideal entry is a pullback to MA20 ("buy dips to MA20"),
+    #                           so Gap = how far price is above MA20 (extension).
+    #   BUY  (breakout)       → enter at market (current price).
+    if signal == "HOLD" and cur_px:
+        closes = [_f(b.get("close")) for b in bars]
+        ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else cur_px
+        entry = round(min(ma20, cur_px), 2)     # MA20 dip-buy, never above current
+    elif signal == "BUY":
+        entry = cur_px
+    else:
+        entry = base.entry_price
+    stop_loss = base.stop_loss
     if enterable and entry and atr_last > 0:
         stop_loss = round(entry - p["atr_stop_mult"] * atr_last, 2)
     # Resistance is a valid target only when it sits ABOVE the entry. For markup
