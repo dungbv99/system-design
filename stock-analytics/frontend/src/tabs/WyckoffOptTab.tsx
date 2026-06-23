@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  createChart, ColorType, CrosshairMode, LineStyle,
+  createChart, ColorType, LineStyle,
   type IChartApi, type Time,
 } from 'lightweight-charts'
 import { api } from '../api'
