@@ -75,6 +75,7 @@ export interface WyckoffSignal {
   stop_loss:       number | null
   description:     string
   bars_analyzed:   number
+  score:           number | null   // optimized confirmation score 0-8
   updated_at:      string
   // joined from symbols table (in list endpoint)
   name?:           string

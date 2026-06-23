@@ -272,6 +272,7 @@ export function WyckoffTab() {
                 <th className="px-3 py-3 text-center font-semibold sticky top-0 z-10 bg-[#161b22]">Exch</th>
                 <th className="px-3 py-3 text-left font-semibold sticky top-0 z-10 bg-[#161b22]">Phase</th>
                 <th className="px-3 py-3 text-center font-semibold sticky top-0 z-10 bg-[#161b22]">Signal</th>
+                <th className="px-3 py-3 text-center font-semibold sticky top-0 z-10 bg-[#161b22]">Score</th>
                 <th className="px-3 py-3 text-center font-semibold sticky top-0 z-10 bg-[#161b22]">Last Event</th>
                 <th className="px-3 py-3 text-right font-semibold sticky top-0 z-10 bg-[#161b22]">Price (K₫)</th>
                 <th className="px-3 py-3 text-right font-semibold sticky top-0 z-10 bg-[#161b22] text-emerald-400">
@@ -328,6 +329,11 @@ export function WyckoffTab() {
                     </td>
                     <td className="px-3 py-2.5 text-center">
                       <SignalBadge signal={row.signal} strength={row.signal_strength} />
+                    </td>
+                    <td className="px-3 py-2.5 text-center tabular-nums font-bold">
+                      {row.score != null
+                        ? <span className={row.score >= 4 ? 'text-emerald-300' : row.score >= 2 ? 'text-amber-300' : 'text-[#8b949e]'}>{row.score}/8</span>
+                        : <span className="text-[#8b949e]">—</span>}
                     </td>
                     <td className="px-3 py-2.5 text-center">
                       {row.last_event

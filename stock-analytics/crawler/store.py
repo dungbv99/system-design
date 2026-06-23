@@ -439,13 +439,18 @@ class Store:
 
     # ── Wyckoff signals ───────────────────────────────────────────────────────
 
+    def ensure_wyckoff_signal_columns(self) -> None:
+        """Idempotent — add columns introduced after the initial schema."""
+        with self._cursor() as cur:
+            cur.execute("ALTER TABLE wyckoff_signals ADD COLUMN IF NOT EXISTS score INT")
+
     def upsert_wyckoff_signal(self, analysis) -> None:
         sql = """
             INSERT INTO wyckoff_signals
                 (symbol, analyzed_at, phase, sub_phase, signal, signal_strength,
                  support, resistance, current_price, last_event,
-                 entry_price, stop_loss, target, rr_ratio, description, bars_analyzed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 entry_price, stop_loss, target, rr_ratio, description, bars_analyzed, score)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (symbol) DO UPDATE SET
                 analyzed_at     = EXCLUDED.analyzed_at,
                 phase           = EXCLUDED.phase,
@@ -462,6 +467,7 @@ class Store:
                 rr_ratio        = EXCLUDED.rr_ratio,
                 description     = EXCLUDED.description,
                 bars_analyzed   = EXCLUDED.bars_analyzed,
+                score           = EXCLUDED.score,
                 updated_at      = NOW()
         """
         with self._cursor() as cur:
@@ -474,6 +480,7 @@ class Store:
                 analysis.entry_price, analysis.stop_loss,
                 analysis.target, analysis.rr_ratio,
                 analysis.description, analysis.bars_analyzed,
+                getattr(analysis, "score", None),
             ))
 
     def get_wyckoff_signal(self, symbol: str) -> Optional[dict]:

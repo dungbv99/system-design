@@ -368,6 +368,7 @@ class Crawler:
         params     = self.store.get_optimized_params(regime) if regime else dict(wyckoff_opt.DEFAULT_PARAMS)
         lookback   = int(params.get("lookback", 260))
         index_bars = self.store.get_symbol_quotes("VNINDEX", days=400) or None
+        self.store.ensure_wyckoff_signal_columns()   # add `score` column if missing
 
         log.info("wyckoff: analysing %d symbols with optimized params (regime=%s)",
                  len(symbols), regime or "n/a")
@@ -387,6 +388,7 @@ class Crawler:
                 analysis.signal      = opt.signal
                 analysis.entry_price = opt.entry_price
                 analysis.stop_loss   = opt.stop_loss
+                analysis.score       = opt.score   # optimized confirmation score (0-8)
                 if (analysis.target is not None and analysis.entry_price
                         and analysis.stop_loss is not None
                         and analysis.entry_price > analysis.stop_loss):

@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS wyckoff_signals (
     rr_ratio        NUMERIC(6,2),            -- reward/risk = (target-entry)/(entry-stop); BUY requires >= 1.5
     description     TEXT,
     bars_analyzed   INT          NOT NULL DEFAULT 0,
+    score           INT,                     -- optimized confirmation score 0-8 (compute_wyckoff)
     updated_at      TIMESTAMP    NOT NULL DEFAULT NOW()
 );
 
