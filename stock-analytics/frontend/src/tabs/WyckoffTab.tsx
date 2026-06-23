@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { WyckoffPage } from '../types'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { WyckoffPage, WyckoffSignal } from '../types'
 import { api } from '../api'
 import { fmtPrice } from '../utils'
 import { ExchangeBadge } from '../components/ui'
@@ -143,8 +143,13 @@ function PhaseDiagram({ phase, sub }: { phase: string; sub: string }) {
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 
-const SIGNAL_FILTERS = ['ALL', 'BUY', 'SHORT', 'HOLD', 'WAIT'] as const
+const SIGNAL_FILTERS = ['ALL', 'BUYABLE', 'BUY', 'SHORT', 'HOLD', 'WAIT'] as const
 type SignalFilter = typeof SIGNAL_FILTERS[number]
+// "Buyable" = what the optimized strategy would enter: BUY (breakout) or HOLD
+// (markup uptrend) with a confirmation score at/above the model threshold.
+const BUYABLE_MIN = 4
+const isBuyable = (r: WyckoffSignal) =>
+  (r.signal === 'BUY' || r.signal === 'HOLD') && (r.score ?? -1) >= BUYABLE_MIN
 
 export function WyckoffTab() {
   const [data,         setData]         = useState<WyckoffPage | null>(null)
@@ -155,6 +160,7 @@ export function WyckoffTab() {
   const [detail,       setDetail]       = useState<{ symbol: string; name: string } | null>(null)
 
   const load = useCallback(async (sig: SignalFilter, phase: string) => {
+    if (sig === 'BUYABLE') { setLoading(false); return }   // client-side from allData
     setLoading(true)
     try {
       const d = await api.wyckoffSignals(sig === 'ALL' ? '' : sig, phase, 200)
@@ -190,6 +196,17 @@ export function WyckoffTab() {
     acc[key] = (acc[key] ?? 0) + 1
     return acc
   }, {} as Record<string, number>) ?? {}
+  const buyableCount = allData?.items.filter(isBuyable).length ?? 0
+
+  // Rows actually rendered: BUYABLE is filtered client-side from allData (BUY+HOLD
+  // with score >= threshold, highest score first); other filters use the server data.
+  const rows = useMemo<WyckoffSignal[]>(() => {
+    if (sigFilter === 'BUYABLE')
+      return (allData?.items ?? []).filter(isBuyable)
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    return data?.items ?? []
+  }, [sigFilter, allData, data])
+  const total = sigFilter === 'BUYABLE' ? rows.length : (data?.total ?? 0)
 
   return (
     <div className="space-y-4">
@@ -224,10 +241,11 @@ export function WyckoffTab() {
           {SIGNAL_FILTERS.map(f => (
             <button key={f} onClick={() => { setSigFilter(f); setPhaseFilter('') }}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all
+                ${f === 'BUYABLE' && sigFilter !== f ? 'border-emerald-700 text-emerald-300 hover:border-emerald-500' : ''}
                 ${sigFilter === f && phaseFilter === ''
                   ? 'bg-[#21262d] border-[#58a6ff] text-[#58a6ff]'
-                  : 'border-[#30363d] text-[#8b949e] hover:text-[#e6edf3] hover:border-[#8b949e]/50'}`}>
-              {f}
+                  : f !== 'BUYABLE' ? 'border-[#30363d] text-[#8b949e] hover:text-[#e6edf3] hover:border-[#8b949e]/50' : ''}`}>
+              {f === 'BUYABLE' ? `🎯 Mua được (${buyableCount})` : f}
             </button>
           ))}
         </div>
@@ -242,11 +260,9 @@ export function WyckoffTab() {
             {p}
           </button>
         ))}
-        {data && (
-          <span className="text-xs text-[#8b949e] ml-auto">
-            {data.total} signals
-          </span>
-        )}
+        <span className="text-xs text-[#8b949e] ml-auto">
+          {total} {sigFilter === 'BUYABLE' ? 'mã mua được' : 'signals'}
+        </span>
       </div>
 
       {/* ── Phase diagram (shown when accumulation/distribution filter active) */}
@@ -262,7 +278,7 @@ export function WyckoffTab() {
         <div className="text-center py-12 text-[#8b949e] text-sm animate-pulse">Loading Wyckoff signals…</div>
       )}
 
-      {!loading && data && (
+      {!loading && (data || sigFilter === 'BUYABLE') && (
         <div className="overflow-x-auto rounded-lg border border-[#30363d]">
           <table className="w-full text-xs">
             <thead className="text-[#8b949e] uppercase tracking-wider text-[11px]">
@@ -289,14 +305,14 @@ export function WyckoffTab() {
               </tr>
             </thead>
             <tbody>
-              {data.items.length === 0 && (
+              {rows.length === 0 && (
                 <tr>
-                  <td colSpan={12} className="px-4 py-10 text-center text-[#8b949e]">
+                  <td colSpan={13} className="px-4 py-10 text-center text-[#8b949e]">
                     No signals match the selected filter
                   </td>
                 </tr>
               )}
-              {data.items.map((row, i) => {
+              {rows.map((row, i) => {
                 // Risk:Reward ratio
                 const rr = (row.entry_price && row.stop_loss && row.resistance &&
                             row.entry_price > row.stop_loss)
