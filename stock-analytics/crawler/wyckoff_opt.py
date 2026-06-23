@@ -438,8 +438,16 @@ def run_live_signal(symbol: str, bars: list[dict], index_bars: list[dict] | None
     atr_last  = ind["atr_last"]
     entry     = base.current_price
     stop_loss = base.stop_loss
-    if signal == "BUY" and entry and atr_last > 0:
+    # BUY (breakout) and HOLD (markup uptrend) are both entries the strategy takes,
+    # so give both an entry (current price) + ATR stop — Wyckoff's base only sets
+    # these for accumulation breakouts, leaving markup entries with no levels.
+    enterable = signal in ("BUY", "HOLD")
+    if enterable and entry and atr_last > 0:
         stop_loss = round(entry - p["atr_stop_mult"] * atr_last, 2)
+    # Resistance is a valid target only when it sits ABOVE the entry. For markup
+    # breakouts the old range high is below price → no fixed target (the strategy
+    # exits via trailing stop + profit-lock, not a take-profit level).
+    target = base.resistance if (base.resistance and entry and base.resistance > entry) else None
 
     return OptSignal(
         symbol=symbol,
@@ -448,7 +456,7 @@ def run_live_signal(symbol: str, bars: list[dict], index_bars: list[dict] | None
         phase=base.phase,
         sub_phase=base.sub_phase,
         current_price=base.current_price,
-        entry_price=entry if signal == "BUY" else base.entry_price,
+        entry_price=entry if enterable else base.entry_price,
         stop_loss=stop_loss,
         rsi=_r(ind["rsi_last"]),
         macd_hist=_r(ind["macd_hist_last"]),
@@ -469,7 +477,7 @@ def run_live_signal(symbol: str, bars: list[dict], index_bars: list[dict] | None
             "atr": _r(atr_last),
         },
         reasons=reasons,
-        resistance=base.resistance,
+        resistance=target,
         signal_strength=base.signal_strength,
         description=base.description,
     )

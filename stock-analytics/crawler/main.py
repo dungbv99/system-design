@@ -388,6 +388,8 @@ class Crawler:
                 analysis.signal      = opt.signal
                 analysis.entry_price = opt.entry_price
                 analysis.stop_loss   = opt.stop_loss
+                analysis.resistance  = opt.resistance   # guarded target (None if no level above entry)
+                analysis.target      = opt.resistance
                 analysis.score       = opt.score   # optimized confirmation score (0-8)
                 if (analysis.target is not None and analysis.entry_price
                         and analysis.stop_loss is not None
