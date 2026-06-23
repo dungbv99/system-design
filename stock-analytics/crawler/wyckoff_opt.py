@@ -103,6 +103,34 @@ TUNE_PARAMS: dict = {
     "rs_min_ratio":           [0.9, 1.0, 1.1],
 }
 
+# Per-regime tuned params from the 1000-trial walk-forward backtest (2014-2025).
+# Seed/fallback used by store.get_optimized_params when the DB has no stored row
+# (e.g. a fresh local deploy) so the optimized strategy runs without re-doing the
+# backtest. Only the tuned keys are listed; the rest fall back to DEFAULT_PARAMS.
+OPTIMIZED_PARAMS: dict = {
+    "UPTREND": {
+        "climax_vol_mult": 2.0, "hi_vol_mult": 1.6, "lo_vol_mult": 0.7,
+        "rsi_entry_max": 55, "rsi_exit_min": 75, "bb_squeeze_thresh": 0.03,
+        "min_signal_score": 3, "atr_stop_mult": 2.0, "atr_trail_pct": 0.9,
+        "profit_giveback_pct": 0.5, "top_n_sectors": 4,
+        "downtrend_drawdown_pct": 0.12, "rs_min_ratio": 0.9,
+    },
+    "SIDEWAYS": {
+        "climax_vol_mult": 2.2, "hi_vol_mult": 1.2, "lo_vol_mult": 0.7,
+        "rsi_entry_max": 45, "rsi_exit_min": 65, "bb_squeeze_thresh": 0.03,
+        "min_signal_score": 4, "atr_stop_mult": 3.0, "atr_trail_pct": 0.85,
+        "profit_giveback_pct": 0.5, "top_n_sectors": 4,
+        "downtrend_drawdown_pct": 0.12, "rs_min_ratio": 1.1,
+    },
+    "DOWNTREND": {
+        "climax_vol_mult": 2.0, "hi_vol_mult": 1.6, "lo_vol_mult": 0.8,
+        "rsi_entry_max": 50, "rsi_exit_min": 75, "bb_squeeze_thresh": 0.07,
+        "min_signal_score": 3, "atr_stop_mult": 2.5, "atr_trail_pct": 0.9,
+        "profit_giveback_pct": 0.3, "top_n_sectors": 2,
+        "downtrend_drawdown_pct": 0.08, "rs_min_ratio": 0.9,
+    },
+}
+
 
 def merge_params(params: Optional[dict]) -> dict:
     """Return DEFAULT_PARAMS overlaid with any provided overrides."""

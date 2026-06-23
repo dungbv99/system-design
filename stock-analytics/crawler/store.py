@@ -1068,8 +1068,12 @@ class Store:
                 row = cur.fetchone()
                 if row:
                     return row["params"]
+                # No DB row (e.g. fresh local deploy) → fall back to the committed
+                # optimized params for this regime, overlaid on DEFAULT_PARAMS.
                 import wyckoff_opt
-                return dict(wyckoff_opt.DEFAULT_PARAMS)
+                params = dict(wyckoff_opt.DEFAULT_PARAMS)
+                params.update(wyckoff_opt.OPTIMIZED_PARAMS.get(regime, {}))
+                return params
             cur.execute("SELECT regime, params, sharpe, updated_at FROM optimized_params")
             rows = cur.fetchall()
         out = {}
@@ -1078,6 +1082,11 @@ class Store:
                 "params": r["params"], "sharpe": float(r["sharpe"]) if r["sharpe"] is not None else None,
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
             }
+        if not out:   # DB empty → seed from the committed optimized params
+            import wyckoff_opt
+            base = dict(wyckoff_opt.DEFAULT_PARAMS)
+            out = {reg: {"params": {**base, **tuned}, "sharpe": None, "updated_at": None}
+                   for reg, tuned in wyckoff_opt.OPTIMIZED_PARAMS.items()}
         return out
 
     def clean_backtest_runs(self) -> int:
