@@ -614,11 +614,24 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         return dataclasses.asdict(sig)
 
     @app.get("/api/buy-now")
-    def buy_now():
-        """Scan VN100 with the CURRENT optimized model and split into:
-          - buyable: the strategy would enter now (signal BUY/HOLD, score >= min)
-          - watch:   1-2 confirmations away (signal BUY/HOLD, min-2 <= score < min)
-        Markup uptrends (signal HOLD) are included — matching the backtest entry rule.
+    def buy_now(universe: str = "vn100", max_gap: float = 5.0, rsi_max: float = 80.0):
+        """Scan a universe with the CURRENT optimized model and split into three
+        actionable buckets that mirror a real entry decision *right now*:
+
+          - buyable:  would enter at the current price now — a fresh breakout (BUY),
+                      or a Markup pullback still close to MA20 (gap ≤ ``max_gap`` %)
+                      and not blown-off (RSI ≤ ``rsi_max``).
+          - extended: passes the score gate but price has already run too far above
+                      MA20 (gap > ``max_gap``) or is overbought — "wait for a dip".
+                      Kept separate so it doesn't pollute the buyable list.
+          - watch:    1-2 confirmations away (score in [min-2, min-1]).
+
+        The split enforces the strategy's own "buy dips to MA20" rule, so the
+        buyable list shows only names whose price is at a level we'd actually
+        enter today — not every stock that merely happens to be in an uptrend.
+
+        ``universe``: "vn100" (default) scans the VN100; "all" scans every symbol
+        that has quote data (indices excluded).
         """
         import wyckoff_opt
         store.ensure_wyckoff_opt_tables()
@@ -627,11 +640,17 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         params = store.get_optimized_params(regime) if regime else dict(wyckoff_opt.DEFAULT_PARAMS)
         min_score = int(params.get("min_signal_score", 4))
 
-        symbols = store.get_vn100_symbols()
+        # Pseudo-symbols (indices) that live in daily_quotes but aren't tradable.
+        _INDICES = {"VNINDEX", "VN30", "VN100", "HNXINDEX", "HNX30",
+                    "UPCOMINDEX", "VNXALL", "VNALL", "VN30F1M", "VN30F2M"}
+        if universe.lower() == "all":
+            symbols = [s for s in store.get_symbols_with_quotes() if s not in _INDICES]
+        else:
+            symbols = store.get_vn100_symbols()
         meta = store.get_symbols_meta(symbols)
         index_bars = store.get_symbol_quotes("VNINDEX", days=400) or None
 
-        buyable, watch = [], []
+        buyable, extended, watch = [], [], []
         for sym in symbols:
             bars = store.get_symbol_quotes(sym, days=400)
             if not bars:
@@ -656,12 +675,30 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
                 "rr": round(rr, 1) if rr is not None else None,
                 "description": s.description,
             }
-            (buyable if s.score >= min_score else watch).append(row)
+            if s.score < min_score:
+                watch.append(row)
+                continue
+            # Score-qualified → is the price still at a level we'd enter today?
+            near_entry = (s.signal == "BUY") or (gap is not None and gap <= max_gap)
+            not_blown  = (s.rsi is None) or (s.rsi <= rsi_max)
+            reasons = []
+            if gap is not None and gap > max_gap:
+                reasons.append(f"gap +{gap:.1f}% > {max_gap:g}% (đã chạy xa MA20)")
+            if s.rsi is not None and s.rsi > rsi_max:
+                reasons.append(f"RSI {s.rsi:.0f} > {rsi_max:g} (quá mua)")
+            if near_entry and not_blown:
+                buyable.append(row)
+            else:
+                row["skip_reasons"] = reasons
+                extended.append(row)
 
-        buyable.sort(key=lambda r: r["score"], reverse=True)
+        buyable.sort(key=lambda r: (r["score"], -(r["gap_pct"] or 0)), reverse=True)
+        extended.sort(key=lambda r: (r["gap_pct"] if r["gap_pct"] is not None else 1e9))
         watch.sort(key=lambda r: r["score"], reverse=True)
         return {"regime": regime or "n/a", "min_score": min_score,
-                "buyable": buyable, "watch": watch}
+                "universe": universe.lower(), "scanned": len(symbols),
+                "max_gap": max_gap, "rsi_max": rsi_max,
+                "buyable": buyable, "extended": extended, "watch": watch}
 
     # ── Backtest (single-symbol Wyckoff walk-forward) ─────────────────────────
 

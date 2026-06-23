@@ -54,6 +54,8 @@ PARAM_GRID: dict[str, list] = {
     "bb_squeeze_thresh":      [0.03, 0.05, 0.07],
     # Entry quality
     "min_signal_score":       [3, 4, 5],
+    # Extension cap above MA20 for HOLD/Markup entries (999 = no cap)
+    "max_entry_gap_pct":      [5, 8, 12, 999],
     # Sector filter
     "top_n_sectors":          [2, 3, 4],
     # Regime detection

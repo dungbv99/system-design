@@ -109,6 +109,10 @@ def _compact_ind(ind: dict) -> dict:
     snapshot is ~200 bytes instead of hundreds of KB of indicator series."""
     out = {k: ind.get(k) for k in _IND_SCALARS}
     out["rsi"] = list(ind.get("rsi", [])[-4:])   # _rising(series, 3) needs 4 vals
+    # MA20 at this bar — needed by the entry extension gate (gap from MA20).
+    closes = ind.get("closes", [])
+    out["ma20_last"] = (sum(closes[-20:]) / 20.0) if len(closes) >= 20 \
+        else (closes[-1] if closes else 0.0)
     return out
 
 
@@ -153,7 +157,7 @@ def _next_trading(s: _SymSeries, day: str) -> tuple[str, float] | None:
 
 # Bump when the snapshot-building logic changes, so old caches are invalidated
 # (the data fingerprint alone can't detect a code change).
-_CTX_CACHE_VERSION = 1
+_CTX_CACHE_VERSION = 2   # v2: snapshots carry ma20_last (entry extension gate)
 
 
 def _ctx_cache_path(data: dict, lookback: int, step: int,
@@ -463,6 +467,18 @@ def _scan_entries(pf: Portfolio, ctx: BacktestContext, day: str,
         # branch of _generate_signal, so this is "buy strength" — the score gate
         # (RSI/MACD/CMF/RS) still controls quality. Backtest/opt path only.
         if base.signal in ("BUY", "HOLD") and score >= p["min_signal_score"]:
+            # Extension gate (HOLD only): don't chase an uptrend that already ran
+            # far above MA20. Enter only while price is within max_entry_gap_pct%
+            # of MA20 — the strategy's own "buy dips to MA20" rule. Mirrors the
+            # /api/buy-now buyable filter so the live list matches the backtest.
+            cap = p.get("max_entry_gap_pct", 999)
+            if base.signal == "HOLD" and cap < 999:   # 999 = no cap
+                ind = snap["ind"]
+                ma20 = ind.get("ma20_last") or 0.0
+                close = ind.get("close_last") or 0.0
+                gap_pct = ((close - ma20) / ma20 * 100.0) if ma20 > 0 else 0.0
+                if gap_pct > cap:
+                    continue
             candidates.append((score, snap))
 
     candidates.sort(key=lambda c: c[0], reverse=True)
@@ -730,8 +746,196 @@ def _run_full_persist(store, data, symbol_sectors, capital, splits,
     except OSError as e:
         log.warning("could not write optimized_params.json: %s", e)
 
+    _dump_results_json(splits, per_regime, capital, n_random_samples)
+    _dump_insert_sql(splits, per_regime, capital)
+
     log.info("run_full_backtest complete: %d splits persisted, params for %s",
              len(splits), list(per_regime.keys()))
+
+
+def _dump_results_json(splits, per_regime, capital, n_random_samples) -> None:
+    """Write ONE self-contained JSON of the whole run to output/ so the result
+    can be shared for analysis without DB access. Contains: per-split test
+    metrics + chosen params (incl. max_entry_gap_pct), cross-split aggregates,
+    the final per-regime params, and every closed trade."""
+    import json
+    import os
+    from datetime import datetime
+
+    def _agg(key):
+        vals = [getattr(sp["test_result"], key) for sp in splits
+                if getattr(sp["test_result"], key) is not None]
+        if not vals:
+            return None
+        return {"mean": round(statistics.mean(vals), 4),
+                "median": round(statistics.median(vals), 4),
+                "min": round(min(vals), 4), "max": round(max(vals), 4)}
+
+    per_split = []
+    for sp in splits:
+        r: BacktestResult = sp["test_result"]
+        per_split.append({
+            "split": sp["split"], "train": sp["train"], "test_range": sp["test"],
+            "train_sharpe": sp.get("train_sharpe"),
+            "params": sp["params"],
+            "max_entry_gap_pct": sp["params"].get("max_entry_gap_pct"),
+            "min_signal_score": sp["params"].get("min_signal_score"),
+            "test_metrics": {
+                "annual_return_pct": r.annual_return, "total_return_pct": r.total_return,
+                "sharpe": r.sharpe_ratio, "max_drawdown": r.max_drawdown,
+                "win_rate": r.win_rate, "total_trades": r.total_trades,
+                "avg_hold_days": r.avg_hold_days, "regime_exit_trades": r.regime_exit_trades,
+                "by_year": r.by_year, "by_regime": r.by_regime,
+                "best_trade": r.best_trade, "worst_trade": r.worst_trade,
+            },
+            "trades": r.trades,
+        })
+
+    payload = {
+        "meta": {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "capital": capital, "n_random_samples": n_random_samples,
+            "n_splits": len(splits),
+            "tune_includes_max_entry_gap_pct": True,
+            "note": "max_entry_gap_pct=999 means the optimizer chose NO extension cap "
+                    "for that split (gating extended HOLD entries did not help there).",
+        },
+        "aggregate_test": {
+            "annual_return_pct": _agg("annual_return"),
+            "total_return_pct":  _agg("total_return"),
+            "sharpe":            _agg("sharpe_ratio"),
+            "max_drawdown":      _agg("max_drawdown"),
+            "win_rate":          _agg("win_rate"),
+            "avg_hold_days":     _agg("avg_hold_days"),
+        },
+        "chosen_max_entry_gap_pct_per_split": {
+            sp["split"]: sp["params"].get("max_entry_gap_pct") for sp in splits
+        },
+        "final_per_regime_params": {r: v["params"] for r, v in per_regime.items()},
+        "per_regime_sharpe": {r: v.get("sharpe") for r, v in per_regime.items()},
+        "splits": per_split,
+    }
+
+    cdir = "output" if os.path.isdir("output") else "."
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(cdir, f"backtest_results_{ts}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+        log.info("wrote full results → %s", path)
+    except OSError as e:
+        log.warning("could not write results json: %s", e)
+
+
+# ── SQL export — insert the server's results into ANY Postgres later ──────────
+
+def _sqlv(v) -> str:
+    """One scalar → a SQL literal. None→NULL, bool→TRUE/FALSE, num→as-is,
+    everything else→single-quoted with quotes doubled."""
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def _sqlj(d) -> str:
+    """A dict → a quoted JSON literal cast to jsonb."""
+    import json
+    return "'" + json.dumps(d or {}, ensure_ascii=False).replace("'", "''") + "'::jsonb"
+
+
+def _dump_insert_sql(splits, per_regime, capital) -> None:
+    """Write ONE .sql file that recreates, on any Postgres, exactly what the
+    server's run persisted: the per-regime ``optimized_params`` (drives the live
+    strategy) plus every ``backtest_runs`` row (its params + metrics) and its
+    ``backtest_trades``. Run it on the local DB with ``psql … -f <file>``.
+
+    SERIAL ids are NOT hard-coded: each run is inserted with RETURNING id inside
+    a CTE that also inserts that run's trades, so foreign keys line up no matter
+    what ids the target DB assigns.  optimized_params.run_id is left NULL (the
+    params themselves are what the strategy needs)."""
+    import os
+    from datetime import datetime
+
+    lines: list[str] = []
+    lines.append("-- Wyckoff-Optimized backtest results — generated "
+                 f"{datetime.now().isoformat(timespec='seconds')}")
+    lines.append("-- Run on the target DB:  psql \"$DB_DSN\" -f <this file>")
+    lines.append("-- Tables are created by store.ensure_wyckoff_opt_tables()/init.sql.")
+    lines.append("BEGIN;")
+    lines.append("")
+    lines.append("-- ── 1. Per-regime optimized params (the live strategy reads this) ──")
+    rows = []
+    for reg, info in per_regime.items():
+        rows.append(f"  ({_sqlv(reg)}, {_sqlj(info.get('params', {}))}, "
+                    f"NULL, {_sqlv(info.get('sharpe', 0.0))})")
+    if rows:
+        lines.append("INSERT INTO optimized_params (regime, params, run_id, sharpe) VALUES")
+        lines.append(",\n".join(rows))
+        lines.append("ON CONFLICT (regime) DO UPDATE SET params=EXCLUDED.params, "
+                     "run_id=EXCLUDED.run_id, sharpe=EXCLUDED.sharpe, updated_at=NOW();")
+    lines.append("")
+    lines.append("-- ── 2. Walk-forward runs + their trades (full computation record) ──")
+
+    run_cols = ("capital, train_start, train_end, test_start, test_end, params, "
+                "regime_scope, annual_return, total_return, sharpe_ratio, max_drawdown, "
+                "win_rate, total_trades, avg_hold_days, by_year, indicator_ic, notes")
+    trade_cols = ("symbol, entry_date, entry_price, exit_date, exit_price, shares, "
+                  "pnl, pnl_pct, hold_days, exit_type, regime_at_entry, wyckoff_phase, "
+                  "sector, ecosystem")
+    # VALUES literals come through as text; cast each column to its target type so
+    # the SELECT→INSERT coerces cleanly (dates/numerics don't auto-coerce here).
+    trade_select = ("r.id, v.symbol, v.entry_date::date, v.entry_price::numeric, "
+                    "v.exit_date::date, v.exit_price::numeric, v.shares::int, "
+                    "v.pnl::numeric, v.pnl_pct::numeric, v.hold_days::int, v.exit_type, "
+                    "v.regime_at_entry, v.wyckoff_phase, v.sector, v.ecosystem")
+
+    for sp in splits:
+        r: BacktestResult = sp["test_result"]
+        run_vals = ", ".join([
+            _sqlv(capital), _sqlv(sp["train"][0]), _sqlv(sp["train"][1]),
+            _sqlv(sp["test"][0]), _sqlv(sp["test"][1]), _sqlj(sp["params"]),
+            _sqlv("ALL"),
+            _sqlv(r.annual_return / 100 if r.annual_return is not None else None),
+            _sqlv(r.total_return / 100 if r.total_return is not None else None),
+            _sqlv(r.sharpe_ratio), _sqlv(r.max_drawdown), _sqlv(r.win_rate),
+            _sqlv(r.total_trades), _sqlv(r.avg_hold_days),
+            _sqlj(r.by_year), _sqlj(r.indicator_ic),
+            _sqlv(f"walk-forward split {sp['split']}"),
+        ])
+        if r.trades:
+            tvals = []
+            for t in r.trades:
+                tvals.append("    (" + ", ".join([
+                    _sqlv(t.get("symbol")), _sqlv(t.get("entry_date")), _sqlv(t.get("entry_price")),
+                    _sqlv(t.get("exit_date")), _sqlv(t.get("exit_price")), _sqlv(t.get("shares")),
+                    _sqlv(t.get("pnl")), _sqlv(t.get("pnl_pct")), _sqlv(t.get("hold_days")),
+                    _sqlv(t.get("exit_type")), _sqlv(t.get("regime_at_entry")),
+                    _sqlv(t.get("wyckoff_phase")), _sqlv(t.get("sector")), _sqlv(t.get("ecosystem")),
+                ]) + ")")
+            lines.append(f"WITH r AS (\n  INSERT INTO backtest_runs ({run_cols})\n"
+                         f"  VALUES ({run_vals}) RETURNING id\n)")
+            lines.append(f"INSERT INTO backtest_trades (run_id, {trade_cols})")
+            lines.append(f"SELECT {trade_select} FROM r, (VALUES\n" + ",\n".join(tvals)
+                         + f"\n) AS v({trade_cols});")
+        else:
+            lines.append(f"INSERT INTO backtest_runs ({run_cols}) VALUES ({run_vals});")
+        lines.append("")
+
+    lines.append("COMMIT;")
+
+    cdir = "output" if os.path.isdir("output") else "."
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(cdir, f"backtest_insert_{ts}.sql")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        log.info("wrote insert SQL → %s", path)
+    except OSError as e:
+        log.warning("could not write insert SQL: %s", e)
 
 
 def optimize_and_save(store, capital: float = 1_000_000_000,

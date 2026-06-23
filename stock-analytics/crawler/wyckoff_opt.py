@@ -53,6 +53,10 @@ DEFAULT_PARAMS: dict = {
     "bb_squeeze_thresh":      0.05,
     # Entry quality
     "min_signal_score":       4,
+    # Extension cap — for established uptrends (HOLD/Markup), only enter when the
+    # price is still within this % above MA20 ("buy dips to MA20"). Stops the
+    # strategy chasing names that already ran far from MA20. 999 = no cap.
+    "max_entry_gap_pct":      8.0,
     # Sector filter
     "top_n_sectors":          3,
     # Regime detection
@@ -93,6 +97,9 @@ TUNE_PARAMS: dict = {
     "rsi_exit_min":           [65, 70, 75],
     "bb_squeeze_thresh":      [0.03, 0.05, 0.07],
     "min_signal_score":       [3, 4, 5],
+    # Extension cap above MA20 for HOLD/Markup entries (999 = no cap → lets the
+    # walk-forward tell us whether gating extended entries actually helps).
+    "max_entry_gap_pct":      [5, 8, 12, 999],
     # Risk management
     "atr_stop_mult":          [1.5, 2.0, 2.5, 3.0],
     "atr_trail_pct":          [0.80, 0.85, 0.90],
