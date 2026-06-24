@@ -397,6 +397,32 @@ export const api = {
       }
       return r.json()
     }),
+  // ── Methods registry (pick which optimization method is deployed live) ────
+  methods: (): Promise<MethodsResponse> =>
+    fetch('/api/methods').then(r => r.json()),
+  deployMethod: (method: string): Promise<{ active: string; method: string }> =>
+    fetch(`/api/methods/deploy?method=${encodeURIComponent(method)}`, { method: 'POST' })
+      .then(async r => {
+        if (!r.ok) {
+          const b = await r.json().catch(() => ({}))
+          throw new Error((b as { detail?: string }).detail ?? r.statusText)
+        }
+        return r.json()
+      }),
+}
+
+// ── Methods registry shapes ─────────────────────────────────────────────────
+
+export interface MethodRow {
+  method: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  params: Record<string, any>
+  metrics: Record<string, number | string | string[] | null> | null
+  chosen_at: string | null
+}
+export interface MethodsResponse {
+  active: string | null
+  methods: MethodRow[]
 }
 
 // ── Wyckoff-Optimized response shapes ───────────────────────────────────────

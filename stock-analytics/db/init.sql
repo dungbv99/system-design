@@ -381,3 +381,10 @@ CREATE TABLE IF NOT EXISTS method_params (
     metrics    JSONB,                      -- CAGR/MaxDD/Sharpe/MC summary
     chosen_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Small key/value config (e.g. active_method = which method is deployed live).
+CREATE TABLE IF NOT EXISTS app_config (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);

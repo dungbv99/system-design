@@ -560,6 +560,25 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         store.ensure_wyckoff_opt_tables()
         return store.get_optimized_params()
 
+    @app.get("/api/methods")
+    def list_methods():
+        """Registry of optimization methods that have stored best-params, plus
+        which one is currently deployed live (drives Buy Now + VN100 BT)."""
+        store.ensure_wyckoff_opt_tables()
+        return {"active": store.get_active_method(),
+                "methods": store.get_method_params()}
+
+    @app.post("/api/methods/deploy")
+    def deploy_method(method: str):
+        """Make a registered method the live set: copy its params into
+        optimized_params and mark it active."""
+        store.ensure_wyckoff_opt_tables()
+        try:
+            store.deploy_method_params(method)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"active": store.get_active_method(), "method": method}
+
     @app.get("/api/backtest/progress")
     def backtest_progress():
         """Live backtest progress: {active, phase, overall_pct, eta_sec, …}.

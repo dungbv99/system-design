@@ -908,6 +908,13 @@ class Store:
                 metrics    JSONB,
                 chosen_at  TIMESTAMPTZ DEFAULT NOW()
             );
+
+            -- Small key/value config (e.g. which method is currently deployed live).
+            CREATE TABLE IF NOT EXISTS app_config (
+                key        TEXT PRIMARY KEY,
+                value      TEXT,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
         """
         with self._cursor() as cur:
             cur.execute(sql)
@@ -1171,7 +1178,22 @@ class Store:
         for regime in regimes:
             self.save_optimized_params(regime, params[regime] if per_regime else params,
                                        None, sharpe)
+        self.set_active_method(method)
         return params
+
+    def set_active_method(self, method: str) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO app_config (key, value, updated_at) "
+                "VALUES ('active_method', %s, NOW()) "
+                "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()",
+                (method,))
+
+    def get_active_method(self) -> Optional[str]:
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT value FROM app_config WHERE key = 'active_method'")
+            row = cur.fetchone()
+            return row["value"] if row else None
 
     def clean_backtest_runs(self) -> int:
         with self._cursor() as cur:
