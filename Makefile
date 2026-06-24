@@ -3,7 +3,7 @@
         build-jobs run-jobs stop-jobs clean-jobs logs-jobs \
         build-stock run-stock stop-stock clean-stock logs-stock crawl-now \
         mark-vn100 backtest backtest-3a backtest-3a-quick backtest-quick \
-        backtest-3b backtest-holdout backtest-cpcv backtest-montecarlo backtest-robustness backtest-robust deploy-method methods \
+        backtest-3b backtest-holdout backtest-cpcv backtest-montecarlo backtest-robustness backtest-robust deploy-method import-params methods \
         optimize live-scan full-pipeline clean-backtest backtest-progress claude-optimize claude-optimize-quick \
         build-java build-go deps test test-java test-go \
         new-go-service
@@ -146,6 +146,18 @@ deploy-method:
 	  "import os; from store import Store; s=Store(os.environ['DB_DSN']); \
 	   s.ensure_wyckoff_opt_tables(); s.deploy_method_params('$(METHOD)'); \
 	   print('deployed method $(METHOD) -> optimized_params (live)')"
+
+# Nạp file params JSON (do server xuất ra) vào method_params của DB hiện tại.
+# Vd: make import-params FILE=output/robust_pipeline_20260624_230000_params.json
+import-params:
+	@test -n "$(FILE)" || { echo "Usage: make import-params FILE=output/robust_pipeline_<ts>_params.json"; exit 1; }
+	docker exec $(CRAWLER_CONTAINER) python3 -c \
+	  "import os, json; from store import Store; \
+	   d=json.load(open('$(FILE)')); s=Store(os.environ['DB_DSN']); \
+	   s.ensure_wyckoff_opt_tables(); \
+	   s.save_method_params(d['method'], d['params'], d.get('metrics')); \
+	   print('imported method', d['method'], '-> method_params (registry)'); \
+	   print('-> make deploy-method METHOD='+d['method']+'  de chay live')"
 
 # Liệt kê các phương pháp backtest / tối ưu
 methods:

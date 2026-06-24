@@ -321,6 +321,27 @@ def run(store, **kw) -> dict:
                       lambda fh: json.dump(result, fh, ensure_ascii=False, indent=2, default=str))
     obt._write_output(f"robust_pipeline_{ts}_params.sql",
                       lambda fh: fh.write(_deploy_sql(params, s1["chosen_score"])))
+
+    # Compact, portable params doc — THE one file to ship back from the server.
+    # Import into any DB with:  make import-params FILE=output/<this file>
+    sm = s2["summary"]
+    method_metrics = {
+        "cagr_pct": sm["cagr_pct"], "sharpe": sm["sharpe"],
+        "max_drawdown_pct": sm["max_drawdown_pct"], "win_rate_pct": sm["win_rate"],
+        "trades": sm["executed_trades"], "score": s1["chosen_score"],
+        "mc_p95_drawdown_pct": s3.get("max_drawdown_pct", {}).get("p95"),
+        "mc_prob_dd_gt_25pct": s3.get("prob_drawdown_gt_25pct"),
+        "fragile_params": s1["fragile_params"],
+    }
+    params_doc = {
+        "method": "8+4+7", "generated_at": result["meta"]["generated_at"],
+        "start_date": start, "end_date": end,
+        "params": params, "metrics": method_metrics,
+    }
+    params_json = f"robust_pipeline_{ts}_params.json"
+    obt._write_output(params_json,
+                      lambda fh: json.dump(params_doc, fh, ensure_ascii=False, indent=2, default=str))
+
     try:
         store.save_portfolio_backtest("Robust pipeline 8+4+7", s2)
     except Exception as e:  # noqa: BLE001
@@ -330,15 +351,7 @@ def run(store, **kw) -> dict:
     # live optimized_params; deploy explicitly via store.deploy_method_params or
     # the emitted *_params.sql).
     try:
-        sm = s2["summary"]
-        store.save_method_params("8+4+7", params, {
-            "cagr_pct": sm["cagr_pct"], "sharpe": sm["sharpe"],
-            "max_drawdown_pct": sm["max_drawdown_pct"], "win_rate_pct": sm["win_rate"],
-            "trades": sm["executed_trades"], "score": s1["chosen_score"],
-            "mc_p95_drawdown_pct": s3.get("max_drawdown_pct", {}).get("p95"),
-            "mc_prob_dd_gt_25pct": s3.get("prob_drawdown_gt_25pct"),
-            "fragile_params": s1["fragile_params"],
-        })
+        store.save_method_params("8+4+7", params, method_metrics)
     except Exception as e:  # noqa: BLE001
         log.warning("could not register method params: %s", e)
 
