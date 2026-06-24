@@ -46,6 +46,11 @@ class Progress:
         self.started_at = 0.0
         self._last_write = 0.0
         self._ticks = 0
+        # Phase plan (weights/offsets/labels). Defaults to the 3a pipeline; a
+        # different pipeline can replace it for its run via ``set_plan``.
+        self._weight = dict(_WEIGHT)
+        self._offset = dict(_OFFSET)
+        self._label = dict(_LABEL)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self, message: str = "starting") -> None:
@@ -54,13 +59,30 @@ class Progress:
         self.current = self.total = 0
         self.message = message
         self.started_at = time.time()
+        # Reset to the default plan; callers override with set_plan() after.
+        self._weight, self._offset, self._label = dict(_WEIGHT), dict(_OFFSET), dict(_LABEL)
+        self._write(force=True)
+
+    def set_plan(self, phases: list[tuple[str, str, float]]) -> None:
+        """Define this run's phases as (key, label, weight). Offsets are derived
+        from cumulative weights, normalised to 100%. Lets a non-3a pipeline
+        report a correct overall percent through the same reporter/endpoint."""
+        total_w = sum(w for _, _, w in phases) or 1.0
+        self._weight, self._offset, self._label = {}, {}, {}
+        off = 0.0
+        for key, label, w in phases:
+            nw = w / total_w * 100.0
+            self._weight[key] = nw
+            self._offset[key] = off
+            self._label[key] = label
+            off += nw
         self._write(force=True)
 
     def set_phase(self, phase: str, total: int, message: str = "") -> None:
         self.phase = phase
         self.total = max(1, total)
         self.current = 0
-        self.message = message or _LABEL.get(phase, phase)
+        self.message = message or self._label.get(phase, phase)
         self._write(force=True)
 
     def tick(self, n: int = 1) -> None:
@@ -87,10 +109,10 @@ class Progress:
     def overall_pct(self) -> float:
         if self.phase == "done":
             return 100.0
-        if self.phase not in _WEIGHT:
+        if self.phase not in self._weight:
             return 0.0
         frac = self.current / self.total if self.total else 0.0
-        return round(_OFFSET[self.phase] + _WEIGHT[self.phase] * frac, 1)
+        return round(self._offset[self.phase] + self._weight[self.phase] * frac, 1)
 
     def snapshot(self) -> dict:
         elapsed = time.time() - self.started_at if self.started_at else 0.0

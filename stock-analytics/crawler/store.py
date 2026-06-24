@@ -898,6 +898,16 @@ class Store:
                 sharpe     NUMERIC(8,3),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             );
+
+            -- Best param set per optimization/backtest method ('8+4+7', '3a', …).
+            -- Registry only: deploying a method copies its params into
+            -- optimized_params (the single live/active set Buy Now + VN100 BT use).
+            CREATE TABLE IF NOT EXISTS method_params (
+                method     TEXT        PRIMARY KEY,
+                params     JSONB       NOT NULL,
+                metrics    JSONB,
+                chosen_at  TIMESTAMPTZ DEFAULT NOW()
+            );
         """
         with self._cursor() as cur:
             cur.execute(sql)
@@ -1106,6 +1116,62 @@ class Store:
             out = {reg: {"params": {**base, **tuned}, "sharpe": None, "updated_at": None}
                    for reg, tuned in wyckoff_opt.OPTIMIZED_PARAMS.items()}
         return out
+
+    # ── Per-method best params (registry) ─────────────────────────────────────
+
+    def save_method_params(self, method: str, params: dict,
+                           metrics: Optional[dict] = None) -> None:
+        """Upsert the best param set a method produced. One row per method."""
+        sql = """
+            INSERT INTO method_params (method, params, metrics, chosen_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (method) DO UPDATE SET
+                params=EXCLUDED.params, metrics=EXCLUDED.metrics, chosen_at=NOW()
+        """
+        with self._cursor() as cur:
+            cur.execute(sql, (method, Json(params), Json(metrics or {})))
+
+    def get_method_params(self, method: Optional[str] = None):
+        """One method → its stored row (or None); no method → list of all rows
+        (most recently chosen first)."""
+        with self._read(factory=psycopg2.extras.RealDictCursor) as cur:
+            if method:
+                cur.execute("SELECT method, params, metrics, chosen_at "
+                            "FROM method_params WHERE method = %s", (method,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                d["chosen_at"] = d["chosen_at"].isoformat() if d["chosen_at"] else None
+                return d
+            cur.execute("SELECT method, params, metrics, chosen_at "
+                        "FROM method_params ORDER BY chosen_at DESC")
+            out = []
+            for r in cur.fetchall():
+                d = dict(r)
+                d["chosen_at"] = d["chosen_at"].isoformat() if d["chosen_at"] else None
+                out.append(d)
+            return out
+
+    def deploy_method_params(self, method: str) -> dict:
+        """Make a stored method's params the live/active set: copy them into
+        optimized_params (Buy Now + VN100 BT read those).
+
+        Two shapes are supported:
+          - global (one flat params dict)        → applied to all three regimes;
+          - per-regime ({UPTREND:…, SIDEWAYS:…}) → each regime gets its own set.
+        """
+        mp = self.get_method_params(method)
+        if not mp:
+            raise ValueError(f"no stored params for method {method!r}")
+        params = mp["params"]
+        sharpe = (mp.get("metrics") or {}).get("sharpe") or 0.0
+        regimes = ("UPTREND", "SIDEWAYS", "DOWNTREND")
+        per_regime = isinstance(params, dict) and all(r in params for r in regimes)
+        for regime in regimes:
+            self.save_optimized_params(regime, params[regime] if per_regime else params,
+                                       None, sharpe)
+        return params
 
     def clean_backtest_runs(self) -> int:
         with self._cursor() as cur:

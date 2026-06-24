@@ -371,3 +371,13 @@ CREATE TABLE IF NOT EXISTS optimized_params (
     sharpe     NUMERIC(8,3),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Best param set per optimization/backtest method ('8+4+7', '3a', …). Registry
+-- only: deploying a method copies its params into optimized_params (the single
+-- live/active set Buy Now + VN100 BT read).
+CREATE TABLE IF NOT EXISTS method_params (
+    method     TEXT        PRIMARY KEY,    -- '8+4+7' | '3a' | …
+    params     JSONB       NOT NULL,
+    metrics    JSONB,                      -- CAGR/MaxDD/Sharpe/MC summary
+    chosen_at  TIMESTAMPTZ DEFAULT NOW()
+);

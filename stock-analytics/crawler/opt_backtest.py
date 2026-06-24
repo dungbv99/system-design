@@ -756,6 +756,22 @@ def _run_full_persist(store, data, symbol_sectors, capital, splits,
     for reg, info in per_regime.items():
         store.save_optimized_params(reg, info["params"], info.get("run_id"), info.get("sharpe", 0.0))
 
+    # Register 3a's best params (per-regime) in the method registry — mirrors
+    # what the 8+4+7 pipeline does, so methods can be compared/deployed uniformly.
+    try:
+        import statistics as _st
+        tr = [sp["test_result"] for sp in splits]
+        metrics = {
+            "kind": "per-regime walk-forward", "splits": len(splits),
+            "mean_test_cagr_pct": round(_st.mean(r.annual_return for r in tr), 2) if tr else None,
+            "sharpe": round(_st.mean(r.sharpe_ratio for r in tr), 3) if tr else None,
+            "mean_test_max_drawdown_pct": round(_st.mean((r.max_drawdown or 0) * 100 for r in tr), 2) if tr else None,
+            "mean_test_win_rate_pct": round(_st.mean((r.win_rate or 0) * 100 for r in tr), 1) if tr else None,
+        }
+        store.save_method_params("3a", {r: v["params"] for r, v in per_regime.items()}, metrics)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not register 3a method params: %s", e)
+
     _write_output("optimized_params.json",
                   lambda fh: json.dump({r: v["params"] for r, v in per_regime.items()}, fh, indent=2))
 
