@@ -174,7 +174,13 @@ def _ctx_cache_path(data: dict, lookback: int, step: int,
         if bars:
             fp.update(str(bars[-1].get("date", "")).encode())
     fp.update(f"v{_CTX_CACHE_VERSION}|{lookback}|{step}|{start_date}|{end_date}".encode())
-    cdir = "output" if os.path.isdir("output") else "."
+    # Pick a writable dir so the cache survives even if the output bind-mount is
+    # broken/absent (server runs) — otherwise every run re-does the ~1.5h build.
+    cdir = "/tmp"
+    for d in ("output", "/app/output"):
+        if os.path.isdir(d) and os.access(d, os.W_OK):
+            cdir = d
+            break
     return os.path.join(cdir, f"ctx_cache_{fp.hexdigest()[:16]}.pkl")
 
 
@@ -299,15 +305,27 @@ def _slice_bars(s: _SymSeries, i: int, max_bars: int | None = None) -> list[dict
 
 def run_backtest(data: dict[str, list[dict]], params: dict, capital: float,
                  start_date: str, end_date: str,
-                 ctx: BacktestContext | None = None) -> BacktestResult:
+                 ctx: BacktestContext | None = None,
+                 regime_params: dict[str, dict] | None = None) -> BacktestResult:
     """Simulate the strategy over [start_date, end_date].
 
     Builds a BacktestContext when one isn't supplied (slow path).  Pass a shared
     ``ctx`` from ``build_context`` when sweeping params so snapshots are computed
     once.  Regime detection + the DOWNTREND exit decision happen INSIDE this loop
     on every date — never via portfolio.py (README §4.4).
+
+    ``regime_params`` {regime: params-overrides}: when given, entry/exit
+    thresholds switch to the day's regime params — this replays the LIVE
+    per-regime optimized model (the tab/Buy-Now strategy) over history. Regime
+    detection and portfolio sizing still use the single ``params`` base so the
+    run stays coherent.
     """
     p = merge_params(params)
+    # Per-regime param sets (entry/exit thresholds switch by the day's regime).
+    rp: dict[str, dict] | None = None
+    if regime_params:
+        rp = {reg: merge_params({**(params or {}), **(regime_params.get(reg) or {})})
+              for reg in ("UPTREND", "SIDEWAYS", "DOWNTREND")}
     if ctx is None:
         ctx = build_context(data, lookback=p["lookback"], step=5,
                             start_date=start_date, end_date=end_date, progress=False)
@@ -335,6 +353,7 @@ def run_backtest(data: dict[str, list[dict]], params: dict, capital: float,
         for pos in pf.open_positions:          # one more trading day held (T+ accounting)
             pos.bars_held += 1
         regime = regime_map.get(day, regime_mod.SIDEWAYS)
+        day_p = rp[regime] if rp else p   # regime-specific thresholds when enabled
         close_prices = _close_prices(ctx, day)
 
         # 1. DOWNTREND → exit everything at next open, no new entries (§4.4).
@@ -352,19 +371,19 @@ def run_backtest(data: dict[str, list[dict]], params: dict, capital: float,
             continue
 
         # 2. Trailing-stop exits (same-bar)
-        update_trailing_stops(pf, close_prices, day, p)
+        update_trailing_stops(pf, close_prices, day, day_p)
         # 3. Max-hold exits
         check_max_hold_exits(pf, close_prices, day)
         # 4. RS exits (cheap — close-window only)
         if index_series is not None:
-            _rs_exits(pf, ctx, index_series, day, close_prices, p)
+            _rs_exits(pf, ctx, index_series, day, close_prices, day_p)
         # 5. Wyckoff-exit on held positions (use today's snapshot if scanned)
         if day in ctx.snapshots:
             _wyckoff_exits(pf, ctx.snapshots[day], day, close_prices)
 
         # 6. New entries on scan days when slots free
         if day in scan_set and pf.can_open() and day in ctx.snapshots:
-            _scan_entries(pf, ctx, day, regime, p)
+            _scan_entries(pf, ctx, day, regime, day_p)
 
         daily_equity.append({"date": day, "equity": round(pf.equity(close_prices), 2)})
 
@@ -737,14 +756,8 @@ def _run_full_persist(store, data, symbol_sectors, capital, splits,
     for reg, info in per_regime.items():
         store.save_optimized_params(reg, info["params"], info.get("run_id"), info.get("sharpe", 0.0))
 
-    import os
-    out_path = "output/optimized_params.json" if os.path.isdir("output") else "optimized_params.json"
-    try:
-        with open(out_path, "w", encoding="utf-8") as fh:
-            json.dump({r: v["params"] for r, v in per_regime.items()}, fh, indent=2)
-        log.info("wrote %s", out_path)
-    except OSError as e:
-        log.warning("could not write optimized_params.json: %s", e)
+    _write_output("optimized_params.json",
+                  lambda fh: json.dump({r: v["params"] for r, v in per_regime.items()}, fh, indent=2))
 
     _dump_results_json(splits, per_regime, capital, n_random_samples)
     _dump_insert_sql(splits, per_regime, capital)
@@ -816,15 +829,31 @@ def _dump_results_json(splits, per_regime, capital, n_random_samples) -> None:
         "splits": per_split,
     }
 
-    cdir = "output" if os.path.isdir("output") else "."
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(cdir, f"backtest_results_{ts}.json")
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
-        log.info("wrote full results → %s", path)
-    except OSError as e:
-        log.warning("could not write results json: %s", e)
+    _write_output(f"backtest_results_{ts}.json",
+                  lambda fh: json.dump(payload, fh, ensure_ascii=False, indent=2, default=str))
+
+
+# ── Robust output writing ─────────────────────────────────────────────────────
+
+def _write_output(filename: str, write_fn) -> str | None:
+    """Write a result file, trying several dirs so a broken/absent ``output``
+    bind-mount never silently loses the file. Logs the ABSOLUTE path written so
+    it can be retrieved with ``docker cp`` even if it lands in a fallback dir."""
+    import os
+    last: Exception | None = None
+    for d in ("output", "/app/output", "/tmp"):
+        try:
+            os.makedirs(d, exist_ok=True)
+            path = os.path.join(d, filename)
+            with open(path, "w", encoding="utf-8") as fh:
+                write_fn(fh)
+            log.info("wrote %s", os.path.abspath(path))
+            return os.path.abspath(path)
+        except OSError as e:
+            last = e
+    log.warning("could not write %s in any of output//app/output//tmp: %s", filename, last)
+    return None
 
 
 # ── SQL export — insert the server's results into ANY Postgres later ──────────
@@ -927,15 +956,49 @@ def _dump_insert_sql(splits, per_regime, capital) -> None:
 
     lines.append("COMMIT;")
 
-    cdir = "output" if os.path.isdir("output") else "."
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(cdir, f"backtest_insert_{ts}.sql")
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
-        log.info("wrote insert SQL → %s", path)
-    except OSError as e:
-        log.warning("could not write insert SQL: %s", e)
+    _write_output(f"backtest_insert_{ts}.sql",
+                  lambda fh: fh.write("\n".join(lines) + "\n"))
+
+
+def build_model_backtest_payload(res: BacktestResult, capital: float,
+                                 start_date: str, end_date: str,
+                                 regime_params: dict, symbols_count: int) -> dict:
+    """Shape a BacktestResult into the JSON the VN100-BT tab renders:
+    {params, summary, equity_curve, yearly, trades}. Trades keep the model's
+    native fields (entry/exit date+price, exit_type, hold_days, regime, pnl%)."""
+    trades = res.trades or []
+    final_equity = res.equity_curve[-1]["equity"] if res.equity_curve else capital
+    gross_w = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+    gross_l = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+    wins = [t for t in trades if t["pnl"] > 0]
+    yearly = [{"year": y, "return_pct": v} for y, v in sorted((res.by_year or {}).items())]
+
+    summary = {
+        "start_date": start_date, "end_date": end_date,
+        "years": round(_year_frac(start_date, end_date), 2),
+        "initial_capital": round(capital, 2), "final_equity": round(final_equity, 2),
+        "total_return_pct": res.total_return, "cagr_pct": res.annual_return,
+        "sharpe": res.sharpe_ratio,
+        "max_drawdown_pct": round((res.max_drawdown or 0) * 100, 2),
+        "win_rate": round((res.win_rate or 0) * 100, 1),
+        "winning_trades": len(wins), "losing_trades": len(trades) - len(wins),
+        "executed_trades": len(trades),
+        "regime_exit_trades": res.regime_exit_trades,
+        "avg_holding_days": res.avg_hold_days,
+        "profit_factor": round(gross_w / gross_l, 2) if gross_l > 0 else None,
+        "best_trade_pct": round(max((t["pnl_pct"] for t in trades), default=0.0), 2),
+        "worst_trade_pct": round(min((t["pnl_pct"] for t in trades), default=0.0), 2),
+        "symbols": symbols_count,
+    }
+    return {
+        "params": {"regime_params": regime_params, "capital": capital,
+                   "start_date": start_date, "end_date": end_date},
+        "summary": summary,
+        "equity_curve": res.equity_curve,
+        "yearly": yearly,
+        "trades": trades,
+    }
 
 
 def optimize_and_save(store, capital: float = 1_000_000_000,

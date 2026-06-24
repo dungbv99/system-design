@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { fmtPrice } from '../utils'
 import { ExchangeBadge } from '../components/ui'
@@ -162,18 +162,41 @@ async function waitForCrawl(maxMs = 180_000): Promise<void> {
   }
 }
 
+// Persist the last scan so neither re-entering the tab NOR reloading the page
+// recomputes 1700+ symbols — it only recomputes when the user presses a button
+// (or changes the universe/gap). localStorage survives full page reloads.
+const LS_KEY = 'buynow_cache_v1'
+interface BuyNowCache { data: BuyNowResp; universe: Universe; maxGap: number }
+let memCache: BuyNowCache | null = null
+
+function readCache(): BuyNowCache | null {
+  if (memCache) return memCache
+  try {
+    const raw = localStorage.getItem(LS_KEY)
+    if (raw) memCache = JSON.parse(raw) as BuyNowCache
+  } catch { /* corrupt/no storage — ignore */ }
+  return memCache
+}
+function writeCache(data: BuyNowResp, universe: Universe, maxGap: number) {
+  memCache = { data, universe, maxGap }
+  try { localStorage.setItem(LS_KEY, JSON.stringify(memCache)) } catch { /* quota — ignore */ }
+}
+
 export function BuyNowTab() {
-  const [data, setData]       = useState<BuyNowResp | null>(null)
+  const [data, setData]       = useState<BuyNowResp | null>(() => readCache()?.data ?? null)
   const [loading, setLoading] = useState(false)
   const [phase, setPhase]     = useState('')   // status line while the button works
-  const [universe, setUniverse] = useState<Universe>('all')
-  const [maxGap, setMaxGap]   = useState<number>(5)   // max % above MA20 to count as "buyable now"
+  const [universe, setUniverse] = useState<Universe>(() => readCache()?.universe ?? 'all')
+  const [maxGap, setMaxGap]   = useState<number>(() => readCache()?.maxGap ?? 5)   // max % above MA20
   const [detail, setDetail]   = useState<{ symbol: string; name: string } | null>(null)
 
   // Rescan only — recompute the model on prices already in the DB (fast).
   const load = useCallback(async (u: Universe, gap: number) => {
     setLoading(true); setPhase('Đang quét theo mô hình hiện tại…')
-    try { setData(await api.buyNow(u, gap)) }
+    try {
+      const d = await api.buyNow(u, gap)
+      setData(d); writeCache(d, u, gap)
+    }
     finally { setLoading(false); setPhase('') }
   }, [])
 
@@ -190,7 +213,8 @@ export function BuyNowTab() {
       setPhase('② Đang chờ crawl giá hoàn tất…')
       await waitForCrawl()
       setPhase('③ Đang tính lại tín hiệu mua…')
-      setData(await api.buyNow(u, gap))
+      const d = await api.buyNow(u, gap)
+      setData(d); writeCache(d, u, gap)
     } catch (e) {
       setPhase(`Lỗi: ${String(e)}`)
       return
@@ -200,7 +224,18 @@ export function BuyNowTab() {
     setPhase('')
   }, [])
 
-  useEffect(() => { void load(universe, maxGap) }, [load, universe, maxGap])
+  // Don't recompute every time the tab is opened. Compute once on the very first
+  // visit (no cache yet); afterwards re-entering the tab shows the cached result.
+  // Changing the universe/gap selector still re-applies; the buttons recompute.
+  const didInit = useRef(false)
+  useEffect(() => {
+    if (!didInit.current) {
+      didInit.current = true
+      if (!readCache()) void load(universe, maxGap)   // nothing cached ever → populate once
+      return                                           // have cache (tab switch / page reload) → no recompute
+    }
+    void load(universe, maxGap)                        // user changed universe/gap → apply
+  }, [load, universe, maxGap])
 
   const pick = (r: BuyRow) => setDetail({ symbol: r.symbol, name: r.name ?? r.symbol })
 

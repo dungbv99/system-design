@@ -288,6 +288,19 @@ export const api = {
       }
       return r.json()
     }),
+  // ── VN100 backtest with the CURRENT optimized Wyckoff model ──────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  vn100ModelBacktest: (): Promise<any> =>
+    fetch('/api/vn100-model-backtest').then(r => r.json()),
+  runVn100ModelBacktest: (startDate: string, capital: number): Promise<{ message: string }> =>
+    fetch(`/api/vn100-model-backtest?start_date=${startDate}&capital=${capital}`, { method: 'POST' })
+      .then(async r => {
+        if (!r.ok) {
+          const b = await r.json().catch(() => ({}))
+          throw new Error((b as { detail?: string }).detail ?? r.statusText)
+        }
+        return r.json()
+      }),
   // ── Paper trades (assumed buys) ──────────────────────────────────────────
   portfolio: (status = ''): Promise<PortfolioPage> =>
     fetch(`/api/portfolio?status=${status}`).then(r => r.json()),

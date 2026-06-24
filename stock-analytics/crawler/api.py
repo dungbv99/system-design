@@ -764,6 +764,33 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
         threading.Thread(target=run, daemon=True).start()
         return {"message": "portfolio backtest started", "label": req.label}
 
+    # ── VN100 backtest with the CURRENT optimized Wyckoff model ───────────────
+
+    @app.get("/api/vn100-model-backtest")
+    def get_vn100_model_backtest():
+        """Latest stored model backtest (trades + performance), or null."""
+        return store.get_latest_portfolio_backtest()
+
+    @app.post("/api/vn100-model-backtest", status_code=202)
+    def run_vn100_model_backtest(start_date: str = "2018-01-01",
+                                 capital: float = 1_000_000_000.0):
+        """Replay the current per-regime optimized model over VN100 (background).
+        First run builds the snapshot context (~10 min) then caches it; re-runs
+        are fast. Poll GET /api/crawl/status, then GET this endpoint."""
+        if not state.acquire(str(date.today()), ["vn100_model_backtest"]):
+            raise HTTPException(409, "A crawl/backtest is already running")
+
+        def run():
+            try:
+                crawler.run_vn100_model_backtest(start_date=start_date, capital=capital)
+            except Exception as e:  # noqa: BLE001
+                log.error("vn100 model backtest failed: %s", e)
+            finally:
+                state.release()
+
+        threading.Thread(target=run, daemon=True).start()
+        return {"message": "vn100 model backtest started", "start_date": start_date}
+
     # ── Derivatives (VN30F1M / VN30F2M / VN30 index) ──────────────────────────
 
     @app.get("/api/derivatives/quotes/{symbol}")
