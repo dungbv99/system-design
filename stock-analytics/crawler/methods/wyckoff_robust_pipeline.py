@@ -98,7 +98,7 @@ def _neighbours(params: dict) -> list[tuple[str, dict]]:
     return out
 
 
-def _sensitivity(data, ctx, capital, start, end, params: dict) -> dict:
+def _sensitivity(data, ctx, capital, start, end, params: dict, pr=None) -> dict:
     """1-D sweep of every tuned param across its whole grid (others fixed at the
     chosen value). Gives the curves + a plateau flag for the frontend later."""
     curves: dict = {}
@@ -107,6 +107,8 @@ def _sensitivity(data, ctx, capital, start, end, params: dict) -> dict:
         for v in choices:
             p = dict(params); p[key] = v
             m = _metrics(_run(data, ctx, capital, start, end, p))
+            if pr:
+                pr.tick()
             pts.append({"value": v, "cagr_pct": m["cagr_pct"], "sharpe": m["sharpe"],
                         "max_drawdown_pct": m["max_drawdown_pct"]})
         chosen = params.get(key)
@@ -121,35 +123,49 @@ def _sensitivity(data, ctx, capital, start, end, params: dict) -> dict:
     return curves
 
 
-def stage1_plateau(data, ctx, capital, start, end, n_samples, top_k, rng) -> dict:
+def stage1_plateau(data, ctx, capital, start, end, n_samples, top_k, rng, pr=None) -> dict:
     keys = list(wo.TUNE_PARAMS.keys())
     log.info("stage1: random search %d candidates", n_samples)
+    if pr:
+        pr.set_phase("stage1_search", n_samples, "Stage 1: plateau search")
+    log_every = max(1, n_samples // 20)
     scored: list[tuple[float, dict, dict]] = []
     seen: set = set()
-    for _ in range(n_samples):
+    for i in range(n_samples):
+        if pr:
+            pr.tick()
         p = {k: rng.choice(wo.TUNE_PARAMS[k]) for k in keys}
         sig = tuple(sorted(p.items()))
-        if sig in seen:
-            continue
-        seen.add(sig)
-        res = _run(data, ctx, capital, start, end, p)
-        scored.append((_score(res), p, _metrics(res)))
+        if sig not in seen:
+            seen.add(sig)
+            res = _run(data, ctx, capital, start, end, p)
+            scored.append((_score(res), p, _metrics(res)))
+        if (i + 1) % log_every == 0 or i + 1 == n_samples:
+            best_so_far = max((s for s, _, _ in scored), default=float("nan"))
+            log.info("stage1: %d/%d scored (best score %.2f)", i + 1, n_samples, best_so_far)
     scored.sort(key=lambda x: x[0], reverse=True)
     top = scored[:top_k]
 
-    log.info("stage1: robustness (worst-neighbour) on top %d", len(top))
+    # Robustness phase: every top candidate's neighbours + the 1-D sensitivity sweep.
+    n_robust = sum(len(_neighbours(p)) for _, p, _ in top) \
+        + sum(len(v) for v in wo.TUNE_PARAMS.values())
+    log.info("stage1: robustness (worst-neighbour) on top %d (%d runs)", len(top), n_robust)
+    if pr:
+        pr.set_phase("stage1_robust", n_robust, "Stage 1: neighbours + sensitivity")
     best = None
     for sc, p, m in top:
         worst = sc
         for _, variant in _neighbours(p):
             worst = min(worst, _score(_run(data, ctx, capital, start, end, variant)))
+            if pr:
+                pr.tick()
         cand = {"params": p, "score": round(sc, 3), "worst_neighbour_score": round(worst, 3),
                 "metrics": m}
         if best is None or cand["worst_neighbour_score"] > best["worst_neighbour_score"]:
             best = cand
 
     log.info("stage1: chosen worst-neighbour score=%.3f", best["worst_neighbour_score"])
-    sens = _sensitivity(data, ctx, capital, start, end, best["params"])
+    sens = _sensitivity(data, ctx, capital, start, end, best["params"], pr=pr)
     fragile = [k for k, c in sens.items() if not c["plateau"]]
     return {
         "chosen_params": best["params"],
@@ -231,6 +247,20 @@ def run(store, **kw) -> dict:
     rng = random.Random(cfg["seed"])
     store.ensure_wyckoff_opt_tables()
 
+    # Progress reporting (pollable via GET /api/backtest/progress + make
+    # backtest-progress) — same reporter the 3a walk-forward uses, with this
+    # pipeline's own phase plan so overall % is meaningful.
+    import progress as _pr
+    pr = _pr.get()
+    pr.start("robust pipeline 8+4+7")
+    pr.set_plan([
+        ("precompute",    "Pre-computing signal snapshots",     30.0),
+        ("stage1_search", "Stage 1: plateau search",            35.0),
+        ("stage1_robust", "Stage 1: neighbours + sensitivity",  25.0),
+        ("stage2",        "Stage 2: continuous run",             7.0),
+        ("stage3",        "Stage 3: Monte Carlo",                3.0),
+    ])
+
     # Load data.
     import sector_rotation as sr
     syms = store.get_vn100_symbols() or list(sr.VN100)
@@ -252,17 +282,23 @@ def run(store, **kw) -> dict:
 
     # Stage 1 — plateau search.
     s1 = stage1_plateau(data, ctx, cfg["capital"], start, end,
-                        cfg["n_samples"], cfg["top_k"], rng)
+                        cfg["n_samples"], cfg["top_k"], rng, pr=pr)
     params = s1["chosen_params"]
 
     # Stage 2 — continuous run with the chosen params.
+    pr.set_phase("stage2", 1, "Stage 2: continuous run")
+    log.info("stage2: continuous run 2014→now with chosen params")
     res = _run(data, ctx, cfg["capital"], start, end, params)
     s2 = obt.build_model_backtest_payload(
         res, cfg["capital"], start, end,
         {"UPTREND": params, "SIDEWAYS": params, "DOWNTREND": params}, len(data) - 1)
+    pr.tick()
 
     # Stage 3 — Monte Carlo on the realised trades.
+    pr.set_phase("stage3", 1, "Stage 3: Monte Carlo")
+    log.info("stage3: Monte Carlo %d paths on %d trades", cfg["mc_runs"], len(s2["trades"]))
     s3 = stage3_montecarlo(s2["trades"], cfg["slots"], cfg["mc_runs"], rng)
+    pr.tick()
 
     result = {
         "meta": {
@@ -312,4 +348,5 @@ def run(store, **kw) -> dict:
              m["cagr_pct"], m["max_drawdown_pct"], m["sharpe"],
              s3.get("max_drawdown_pct", {}).get("p95"),
              s3.get("prob_drawdown_gt_25pct", 0) * 100, s1["fragile_params"])
+    pr.finish("robust pipeline done")
     return result

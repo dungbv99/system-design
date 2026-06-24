@@ -19,6 +19,7 @@ LOGFILE="$OUT_DIR/robust_pipeline_$(date +%Y%m%d_%H%M%S).log"
 {
     echo "Robust pipeline (8→4→7) started: $(date)"
     echo "Capital: $CAPITAL | Samples: $N_SAMPLES | MC runs: $MC_RUNS | From: $START_DATE"
+    echo "Progress: make backtest-progress   (or GET /api/backtest/progress)"
     echo "---"
 } | tee "$LOGFILE"
 
@@ -35,7 +36,15 @@ start     = sys.argv[4]
 store     = Store(os.environ["DB_DSN"])
 t0        = time.time()
 
-run(store, capital=capital, n_samples=n_samples, mc_runs=mc_runs, start_date=start)
+try:
+    run(store, capital=capital, n_samples=n_samples, mc_runs=mc_runs, start_date=start)
+except Exception as exc:
+    try:
+        import progress
+        progress.get().fail(f"robust pipeline error: {exc}")
+    except Exception:
+        pass
+    raise
 e = time.time() - t0
 print(f"Finished in {int(e//60)}m {int(e%60)}s")
 PYEOF
