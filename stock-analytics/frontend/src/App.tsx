@@ -14,6 +14,7 @@ import { StrongBuyTab } from './tabs/StrongBuyTab'
 import { PortfolioTab } from './tabs/PortfolioTab'
 import { BacktestTab }  from './tabs/BacktestTab'
 import { PortfolioBacktestTab } from './tabs/PortfolioBacktestTab'
+import { MethodsTab }   from './tabs/MethodsTab'
 import { FundsTab }     from './tabs/FundsTab'
 import { CrawlTab }     from './tabs/CrawlTab'
 import { HistoryTab }   from './tabs/HistoryTab'
@@ -24,7 +25,7 @@ export default function App() {
   const [stats,       setStats]       = useState<Stats | null>(null)
   const [crawlStatus, setCrawlStatus] = useState<CrawlStatus | null>(null)
   const [runs,        setRuns]        = useState<CrawlRun[]>([])
-  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'industry' | 'wyckoff' | 'wyckoffopt' | 'multifactor' | 'derivatives' | 'buynow' | 'strongbuy' | 'portfolio' | 'backtest' | 'vn100bt' | 'funds' | 'crawl' | 'history'>('market')
+  const [activeTab,   setActiveTab]   = useState<'market' | 'board' | 'industry' | 'wyckoff' | 'wyckoffopt' | 'multifactor' | 'derivatives' | 'buynow' | 'strongbuy' | 'portfolio' | 'backtest' | 'vn100bt' | 'methods' | 'funds' | 'crawl' | 'history'>('market')
   const [now,         setNow]         = useState(() => new Date())
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -65,6 +66,7 @@ export default function App() {
     { id: 'portfolio', label: '💼 Portfolio' },
     { id: 'backtest', label: '⏪ Backtest'  },
     { id: 'vn100bt',  label: '📉 VN100 BT'  },
+    { id: 'methods',  label: '🧪 Phương pháp' },
     { id: 'funds',    label: '🏦 Funds'     },
     { id: 'crawl',    label: isRunning ? '⏳ Crawl' : '▶ Crawl' },
     { id: 'history',  label: '📋 History'  },
@@ -160,6 +162,7 @@ export default function App() {
         {activeTab === 'portfolio' && <PortfolioTab />}
         {activeTab === 'backtest' && <BacktestTab />}
         {activeTab === 'vn100bt'  && <PortfolioBacktestTab />}
+        {activeTab === 'methods'  && <MethodsTab />}
         {activeTab === 'funds'    && <FundsTab />}
         {activeTab === 'crawl'   && <CrawlTab crawlStatus={crawlStatus} isRunning={isRunning} onRefresh={refresh} />}
         {activeTab === 'history' && <HistoryTab runs={runs} />}

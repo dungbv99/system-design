@@ -2,7 +2,9 @@
         build-live run-live stop-live clean-live logs-live \
         build-jobs run-jobs stop-jobs clean-jobs logs-jobs \
         build-stock run-stock stop-stock clean-stock logs-stock crawl-now \
-        mark-vn100 backtest backtest-quick optimize live-scan full-pipeline clean-backtest backtest-progress claude-optimize claude-optimize-quick \
+        mark-vn100 backtest backtest-3a backtest-3a-quick backtest-quick \
+        backtest-3b backtest-holdout backtest-cpcv backtest-montecarlo backtest-robustness backtest-robust deploy-method methods \
+        optimize live-scan full-pipeline clean-backtest backtest-progress claude-optimize claude-optimize-quick \
         build-java build-go deps test test-java test-go \
         new-go-service
 
@@ -102,13 +104,64 @@ mark-vn100:
 	  "from store import Store; import os, sector_rotation as sr; \
 	   print('marked', Store(os.environ['DB_DSN']).mark_vn100(sr.VN100), 'VN100 symbols')"
 
-# Full walk-forward backtest (2014-2025) — 1000 samples, ~2-6h.
-backtest:
-	@bash stock-analytics/scripts/run_backtest.sh $(CAPITAL) 1000
+# ── Backtest / optimization methods ──────────────────────────────────────
+# ĐANG DÙNG: 3a (walk-forward trượt). Mỗi phương pháp sẽ là 1 file riêng trong
+# crawler/methods/ khi được cài đặt.  `make methods` để xem toàn bộ danh sách.
 
-# Quick backtest — 100 samples, ~30-60 min.
-backtest-quick:
+# 3a — Walk-forward trượt [HIỆN DÙNG]: train 3 năm → test năm kế, 1000 samples (~2-6h)
+backtest-3a:
+	@bash stock-analytics/scripts/run_backtest.sh $(CAPITAL) 1000
+backtest: backtest-3a            # alias mặc định = phương pháp đang dùng (3a)
+
+# 3a nhanh — 100 samples (~30-60 phút) để kiểm tra pipeline
+backtest-3a-quick:
 	@bash stock-analytics/scripts/run_backtest.sh $(CAPITAL) 100
+backtest-quick: backtest-3a-quick
+
+# Các phương pháp khác — CHƯA CÀI ĐẶT (mỗi cái = 1 file trong crawler/methods/)
+backtest-3b:
+	@echo "3b walk-forward neo — chưa cài đặt → crawler/methods/walk_forward_anchored.py"
+backtest-holdout:
+	@echo "2  holdout (train/test 1 lần) — chưa cài đặt → crawler/methods/holdout.py"
+backtest-cpcv:
+	@echo "6  combinatorial purged CV — chưa cài đặt → crawler/methods/cpcv.py"
+backtest-montecarlo:
+	@echo "7  Monte Carlo (độ tin cậy) — chưa cài đặt → crawler/methods/montecarlo.py"
+backtest-robustness:
+	@echo "8  robustness/sensitivity — chưa cài đặt → crawler/methods/robustness.py"
+
+# 8+4+7 — Robust pipeline [ĐÃ CÀI ĐẶT]: plateau search → continuous → Monte Carlo.
+# Vars: CAPITAL, SAMPLES (stage-1 candidates), MC (monte-carlo paths), START (yyyy-mm-dd)
+SAMPLES ?= 200
+MC      ?= 2000
+START   ?= 2014-01-01
+backtest-robust:
+	@bash stock-analytics/scripts/run_robust_pipeline.sh $(CAPITAL) $(SAMPLES) $(MC) $(START)
+
+# Deploy params tốt nhất của 1 phương pháp (đã lưu ở method_params) → optimized_params
+# (bộ đang chạy live mà Buy Now + VN100 BT dùng).  Vd: make deploy-method METHOD=8+4+7
+METHOD ?= 8+4+7
+deploy-method:
+	docker exec $(CRAWLER_CONTAINER) python3 -c \
+	  "import os; from store import Store; s=Store(os.environ['DB_DSN']); \
+	   s.ensure_wyckoff_opt_tables(); s.deploy_method_params('$(METHOD)'); \
+	   print('deployed method $(METHOD) -> optimized_params (live)')"
+
+# Liệt kê các phương pháp backtest / tối ưu
+methods:
+	@echo "Phương pháp backtest / tối ưu params (đang dùng = 3a):"
+	@echo "  3a  make backtest-3a          Walk-forward trượt          [ĐANG DÙNG]"
+	@echo "      make backtest-3a-quick    3a nhanh (100 samples)"
+	@echo "  3b  make backtest-3b          Walk-forward neo (anchored) [chưa cài đặt]"
+	@echo "  2   make backtest-holdout     Holdout train/test 1 lần    [chưa cài đặt]"
+	@echo "  6   make backtest-cpcv        Combinatorial Purged CV     [chưa cài đặt]"
+	@echo "  4   (tab VN100 BT)            Continuous fixed-params     [đã có]"
+	@echo "  7   make backtest-montecarlo  Monte Carlo độ tin cậy      [chưa cài đặt]"
+	@echo "  8   make backtest-robustness  Robustness / sensitivity    [chưa cài đặt]"
+	@echo "  ★   make backtest-robust      Pipeline 8+4+7 (combo)      [ĐÃ CÀI ĐẶT]"
+	@echo ""
+	@echo "  Deploy params 1 phương pháp (method_params → optimized_params live):"
+	@echo "      make deploy-method METHOD=8+4+7   (hoặc METHOD=3a)"
 
 # Optimize per regime and save params (assumes data already loaded).
 optimize:
