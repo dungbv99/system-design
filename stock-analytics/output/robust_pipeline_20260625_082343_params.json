@@ -1,0 +1,33 @@
+{
+  "method": "8+4+7",
+  "generated_at": "2026-06-25T08:23:43",
+  "start_date": "2014-01-01",
+  "end_date": "2026-06-24",
+  "params": {
+    "climax_vol_mult": 2.0,
+    "hi_vol_mult": 1.4,
+    "lo_vol_mult": 0.5,
+    "rsi_entry_max": 55,
+    "rsi_exit_min": 75,
+    "bb_squeeze_thresh": 0.03,
+    "min_signal_score": 3,
+    "max_entry_gap_pct": 999,
+    "atr_stop_mult": 2.0,
+    "atr_trail_pct": 0.8,
+    "profit_giveback_pct": 0.5,
+    "top_n_sectors": 4,
+    "downtrend_drawdown_pct": 0.1,
+    "rs_min_ratio": 0.9
+  },
+  "metrics": {
+    "cagr_pct": 14.09,
+    "sharpe": 0.917,
+    "max_drawdown_pct": 15.68,
+    "win_rate_pct": 50.5,
+    "trades": 914,
+    "score": 1.771,
+    "mc_p95_drawdown_pct": 18.05,
+    "mc_prob_dd_gt_25pct": 0.002,
+    "fragile_params": []
+  }
+}

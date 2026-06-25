@@ -1,0 +1,50 @@
+nohup: ignoring input
+Robust pipeline (8→4→7) started: Thu Jun 25 08:08:33 UTC 2026
+Capital: 1000000000 | Samples: 200 | MC runs: 2000 | From: 2014-01-01
+Progress: make backtest-progress   (or GET /api/backtest/progress)
+---
+2026-06-25 08:08:36,418 [INFO] robust pipeline: 100 symbols 2014-01-01→2026-06-24 | samples=200 top_k=4 mc=2000
+2026-06-25 08:08:37,929 [INFO] precompute snapshots [0/617] (2014-01-02) — 52 symbols scanned
+2026-06-25 08:09:18,194 [INFO] precompute snapshots [61/617] (2015-04-03) — 54 symbols scanned
+2026-06-25 08:10:00,235 [INFO] precompute snapshots [122/617] (2016-06-28) — 56 symbols scanned
+2026-06-25 08:10:45,456 [INFO] precompute snapshots [183/617] (2017-10-02) — 62 symbols scanned
+2026-06-25 08:11:36,525 [INFO] precompute snapshots [244/617] (2018-12-26) — 79 symbols scanned
+2026-06-25 08:12:38,057 [INFO] precompute snapshots [305/617] (2020-03-23) — 90 symbols scanned
+2026-06-25 08:13:46,389 [INFO] precompute snapshots [366/617] (2021-06-10) — 91 symbols scanned
+2026-06-25 08:14:58,487 [INFO] precompute snapshots [427/617] (2022-08-26) — 96 symbols scanned
+2026-06-25 08:16:13,228 [INFO] precompute snapshots [488/617] (2023-11-15) — 98 symbols scanned
+2026-06-25 08:17:30,635 [INFO] precompute snapshots [549/617] (2025-02-10) — 98 symbols scanned
+2026-06-25 08:18:48,677 [INFO] precompute snapshots [610/617] (2026-05-05) — 99 symbols scanned
+2026-06-25 08:18:56,840 [INFO] build_context: cached snapshots to output/ctx_cache_bb3bd0b8d41ca816.pkl
+2026-06-25 08:18:56,841 [INFO] stage1: random search 200 candidates
+2026-06-25 08:20:26,196 [INFO] stage1: 10/200 scored (best score 1.82)
+2026-06-25 08:20:32,397 [INFO] stage1: 20/200 scored (best score 1.82)
+2026-06-25 08:20:38,374 [INFO] stage1: 30/200 scored (best score 1.82)
+2026-06-25 08:20:44,500 [INFO] stage1: 40/200 scored (best score 1.82)
+2026-06-25 08:20:50,806 [INFO] stage1: 50/200 scored (best score 1.82)
+2026-06-25 08:20:56,899 [INFO] stage1: 60/200 scored (best score 1.82)
+2026-06-25 08:21:02,877 [INFO] stage1: 70/200 scored (best score 1.82)
+2026-06-25 08:21:09,238 [INFO] stage1: 80/200 scored (best score 1.84)
+2026-06-25 08:21:14,784 [INFO] stage1: 90/200 scored (best score 1.84)
+2026-06-25 08:21:20,902 [INFO] stage1: 100/200 scored (best score 1.84)
+2026-06-25 08:21:26,993 [INFO] stage1: 110/200 scored (best score 1.84)
+2026-06-25 08:21:33,079 [INFO] stage1: 120/200 scored (best score 1.84)
+2026-06-25 08:21:39,250 [INFO] stage1: 130/200 scored (best score 1.84)
+2026-06-25 08:21:45,352 [INFO] stage1: 140/200 scored (best score 1.84)
+2026-06-25 08:21:51,363 [INFO] stage1: 150/200 scored (best score 1.84)
+2026-06-25 08:21:57,701 [INFO] stage1: 160/200 scored (best score 1.84)
+2026-06-25 08:22:04,065 [INFO] stage1: 170/200 scored (best score 1.84)
+2026-06-25 08:22:09,767 [INFO] stage1: 180/200 scored (best score 1.84)
+2026-06-25 08:22:15,618 [INFO] stage1: 190/200 scored (best score 1.84)
+2026-06-25 08:22:21,987 [INFO] stage1: 200/200 scored (best score 1.84)
+2026-06-25 08:22:21,988 [INFO] stage1: robustness (worst-neighbour) on top 4 (122 runs)
+2026-06-25 08:23:10,787 [INFO] stage1: chosen worst-neighbour score=1.479
+2026-06-25 08:23:41,404 [INFO] stage2: continuous run 2014→now with chosen params
+2026-06-25 08:23:42,075 [INFO] stage3: Monte Carlo 2000 paths on 914 trades
+2026-06-25 08:23:43,426 [INFO] wrote /app/output/robust_pipeline_20260625_082343.json
+2026-06-25 08:23:43,427 [INFO] wrote /app/output/robust_pipeline_20260625_082343_params.sql
+2026-06-25 08:23:43,427 [INFO] wrote /app/output/robust_pipeline_20260625_082343_params.json
+2026-06-25 08:23:43,458 [INFO] robust pipeline done: CAGR 14.1% MaxDD 15.7% Sharpe 0.917 | MC p95 DD 18.1% P(DD>25%)=0.2% | fragile=[]
+Finished in 15m 10s
+---
+Robust pipeline finished: Thu Jun 25 08:23:43 UTC 2026
