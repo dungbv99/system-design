@@ -331,10 +331,10 @@ export function PortfolioBacktestTab() {
               <div className="mt-1.5 h-1.5 rounded bg-cyan-950 overflow-hidden">
                 <div className="h-full bg-cyan-500 transition-all" style={{ width: `${Math.min(100, Math.max(2, prog.pct))}%` }} />
               </div>
-              {prog.pct <= 50 && <div className="mt-1 text-cyan-200/50">Đang dựng snapshot — lần đầu ~10 phút rồi cache lại; các lần sau nhanh hơn nhiều.</div>}
+              {prog.pct <= 50 && <div className="mt-1 text-cyan-200/50">Đang dựng snapshot — quét mỗi phiên nên lần đầu có thể 20–40 phút rồi cache lại; các lần sau nhanh hơn nhiều.</div>}
             </>
           ) : (
-            'Đang chạy backtest model trên VN100… Lần chạy ĐẦU phải dựng snapshot (~10 phút) rồi cache lại; các lần sau nhanh hơn nhiều.'
+            'Đang chạy backtest model trên VN100… Quét mua mỗi phiên — lần chạy ĐẦU dựng snapshot (~20–40 phút) rồi cache lại; các lần sau nhanh hơn nhiều.'
           )}
         </div>
       )}

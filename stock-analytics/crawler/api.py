@@ -792,16 +792,20 @@ def create_app(crawler, store, state: CrawlState) -> FastAPI:
 
     @app.post("/api/vn100-model-backtest", status_code=202)
     def run_vn100_model_backtest(start_date: str = "2018-01-01",
-                                 capital: float = 1_000_000_000.0):
+                                 capital: float = 1_000_000_000.0,
+                                 scan_step: int = 1):
         """Replay the current per-regime optimized model over VN100 (background).
-        First run builds the snapshot context (~10 min) then caches it; re-runs
-        are fast. Poll GET /api/crawl/status, then GET this endpoint."""
+        ``scan_step``=1 looks for new entries every session (default); =5 is the
+        old weekly cadence (faster). First daily run rebuilds the snapshot
+        context (~20-40 min) then caches it. Poll GET /api/crawl/status, then GET
+        this endpoint."""
         if not state.acquire(str(date.today()), ["vn100_model_backtest"]):
             raise HTTPException(409, "A crawl/backtest is already running")
 
         def run():
             try:
-                crawler.run_vn100_model_backtest(start_date=start_date, capital=capital)
+                crawler.run_vn100_model_backtest(start_date=start_date, capital=capital,
+                                                 scan_step=scan_step)
             except Exception as e:  # noqa: BLE001
                 log.error("vn100 model backtest failed: %s", e)
             finally:

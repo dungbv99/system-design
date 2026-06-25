@@ -519,20 +519,29 @@ class Crawler:
         label:      str   = "VN100 — current Wyckoff model",
         start_date: str   = "2018-01-01",
         capital:    float = 1_000_000_000.0,
+        scan_step:  int   = 1,
     ) -> int:
         """Replay the CURRENT optimized Wyckoff model (per-regime params in the
         ``optimized_params`` DB table) over VN100 history and persist the result
         (trades + performance) for the VN100-BT tab. Reads whatever params are in
         the DB now, so re-running after changing params shows the new behaviour.
 
-        First call builds the snapshot context (~10 min) then caches it to disk;
-        subsequent re-runs are fast (cache hit + one simulation pass).
+        ``scan_step`` — how often (in trading days) the model looks for NEW
+        entries. 1 = scan EVERY session (so a stock can be bought on any day its
+        signal qualifies and a slot/cash is free); 5 = weekly (faster, the old
+        behaviour). Exits are always checked daily regardless. T+ lock
+        (``min_hold_days``, default 3) still prevents selling before ~3 sessions.
+
+        First call builds the snapshot context — daily scanning (step=1) is ~5×
+        heavier so the first build can take 20–40 min — then caches it to disk;
+        re-runs reuse the cache (one fast simulation pass).
         """
         import opt_backtest as obt
 
         self.store.ensure_wyckoff_opt_tables()
         syms = VN100
-        log.info("vn100 model backtest '%s': %d symbols from %s", label, len(syms), start_date)
+        log.info("vn100 model backtest '%s': %d symbols from %s (scan every %d session(s))",
+                 label, len(syms), start_date, scan_step)
 
         # Load VN100 + VNINDEX bars.
         data: dict[str, list[dict]] = {}
@@ -551,7 +560,7 @@ class Crawler:
                          for reg in ("UPTREND", "SIDEWAYS", "DOWNTREND")}
         base = dict(regime_params["SIDEWAYS"])   # regime detection + portfolio sizing base
 
-        ctx = obt.build_context(data, symbol_sectors, lookback=260, step=5,
+        ctx = obt.build_context(data, symbol_sectors, lookback=260, step=scan_step,
                                 start_date=start_date, end_date=end_date)
         res = obt.run_backtest(data, base, capital, start_date, end_date,
                                ctx=ctx, regime_params=regime_params)
