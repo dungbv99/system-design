@@ -173,6 +173,7 @@ export function PortfolioBacktestTab() {
   const [tradeView,    setTradeView]    = useState<'list' | 'symbol'>('list')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [prog, setProg] = useState<{ pct: number; msg: string } | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const fetchLatest = useCallback(async () => {
     setLoading(true)
@@ -203,7 +204,7 @@ export function PortfolioBacktestTab() {
         // polls (the run had already completed before we attached).
         if (sawRunning || misses >= 3) {
           if (pollRef.current) clearInterval(pollRef.current)
-          setRunning(false); setProg(null)
+          setRunning(false); setProg(null); setNotice(null)
           await fetchLatest()
         }
       } catch { /* keep polling */ }
@@ -212,18 +213,27 @@ export function PortfolioBacktestTab() {
 
   useEffect(() => {
     fetchLatest()
-    // Attach to a backtest already running (e.g. started before this mount).
-    api.status().then(st => { if (st.running) { setRunning(true); startPolling() } }).catch(() => {})
+    // A backtest already running (e.g. started before this mount) → tell the
+    // user and follow it instead of pretending nothing is happening.
+    api.status().then(st => {
+      if (st.running) {
+        setRunning(true)
+        setNotice('⚠️ Đang có một backtest chạy nền — đang theo dõi tiến trình hiện tại.')
+        startPolling()
+      }
+    }).catch(() => {})
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [fetchLatest, startPolling])
 
   const handleRun = async () => {
-    setRunning(true)
+    setRunning(true); setNotice(null)
     try {
       await api.runVn100ModelBacktest(start, capital)
     } catch (e) {
-      // 409 = a crawl/backtest is already running → attach to it, don't fail silently.
+      // 409 = a crawl/backtest is already running. Don't start a second one —
+      // just tell the user and follow the run that's already going.
       if (e instanceof Error && /already running|409|conflict/i.test(e.message)) {
+        setNotice('⚠️ Đã có một tiến trình backtest đang chạy. Không tạo run mới — đang theo dõi tiến trình hiện tại.')
         startPolling(); return
       }
       setRunning(false); return
@@ -305,6 +315,11 @@ export function PortfolioBacktestTab() {
         </div>
       </div>
 
+      {notice && (
+        <div className="rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-300">
+          {notice}
+        </div>
+      )}
       {running && (
         <div className="rounded-lg border border-cyan-900/50 bg-cyan-950/20 p-3 text-[11px] text-cyan-200/80">
           {prog ? (
