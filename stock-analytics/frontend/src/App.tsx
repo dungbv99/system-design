@@ -102,71 +102,78 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Stat bar ────────────────────────────────────────────────────── */}
-      <div className="px-6 py-3 flex gap-3 flex-wrap border-b border-[#30363d] bg-[#0d1117]">
-        <StatCard
-          label="Listed Symbols"
-          value={stats?.total_symbols.toLocaleString() ?? '—'}
-          accent="text-[#58a6ff]"
-          icon="🏦"
-          borderColor="#58a6ff"
-        />
-        <StatCard
-          label="Price Records"
-          value={stats?.total_quotes.toLocaleString() ?? '—'}
-          accent="text-purple-400"
-          icon="📊"
-          borderColor="#a855f7"
-        />
-        <StatCard
-          label="Latest Date"
-          value={stats?.latest_date ?? '—'}
-          accent="text-emerald-400"
-          icon="📅"
-          borderColor="#34d399"
-        />
-        <StatCard
-          label="Last Crawl"
-          value={stats?.last_run?.status ?? '—'}
-          accent={lastRunAccent}
-          icon="🤖"
-          borderColor={stats?.last_run?.status === 'done' ? '#34d399' : '#f59e0b'}
-        />
-      </div>
+      {/* ── Body: vertical sidebar nav + content column ─────────────────── */}
+      <div className="flex">
+        {/* Sidebar (vertical tabs) */}
+        <nav className="w-52 shrink-0 border-r border-[#30363d] bg-[#0d1117] sticky top-14 self-start
+                        h-[calc(100vh-3.5rem)] overflow-y-auto scrollbar-none py-2">
+          {TABS.map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+              className={`w-full text-left px-4 py-2.5 text-sm font-medium border-l-2 transition-all cursor-pointer ${
+                activeTab === tab.id
+                  ? 'border-[#58a6ff] text-[#58a6ff] bg-[#161b22]'
+                  : 'border-transparent text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#161b22]/50'
+              }`}>
+              {tab.label}
+            </button>
+          ))}
+        </nav>
 
-      {/* ── Tab nav ─────────────────────────────────────────────────────── */}
-      <div className="px-6 flex border-b border-[#30363d] bg-[#0d1117] sticky top-14 z-10 overflow-x-auto scrollbar-none">
-        {TABS.map(tab => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-            className={`px-5 py-3 text-sm font-medium border-b-4 transition-all cursor-pointer ${
-              activeTab === tab.id
-                ? 'border-[#58a6ff] text-[#58a6ff]'
-                : 'border-transparent text-[#8b949e] hover:text-[#e6edf3] hover:border-[#30363d]'
-            }`}>
-            {tab.label}
-          </button>
-        ))}
-      </div>
+        {/* Content column */}
+        <div className="flex-1 min-w-0">
+          {/* ── Stat bar ──────────────────────────────────────────────── */}
+          <div className="px-6 py-3 flex gap-3 flex-wrap border-b border-[#30363d] bg-[#0d1117]">
+            <StatCard
+              label="Listed Symbols"
+              value={stats?.total_symbols.toLocaleString() ?? '—'}
+              accent="text-[#58a6ff]"
+              icon="🏦"
+              borderColor="#58a6ff"
+            />
+            <StatCard
+              label="Price Records"
+              value={stats?.total_quotes.toLocaleString() ?? '—'}
+              accent="text-purple-400"
+              icon="📊"
+              borderColor="#a855f7"
+            />
+            <StatCard
+              label="Latest Date"
+              value={stats?.latest_date ?? '—'}
+              accent="text-emerald-400"
+              icon="📅"
+              borderColor="#34d399"
+            />
+            <StatCard
+              label="Last Crawl"
+              value={stats?.last_run?.status ?? '—'}
+              accent={lastRunAccent}
+              icon="🤖"
+              borderColor={stats?.last_run?.status === 'done' ? '#34d399' : '#f59e0b'}
+            />
+          </div>
 
-      {/* ── Main content ────────────────────────────────────────────────── */}
-      <main className="px-6 py-5 max-w-screen-xl mx-auto">
-        {activeTab === 'market'   && <MarketTab />}
-        {activeTab === 'board'    && <VnBoardTab />}
-        {activeTab === 'industry' && <IndustryTab />}
-        {activeTab === 'wyckoff'  && <WyckoffTab />}
-        {activeTab === 'wyckoffopt' && <WyckoffOptTab />}
-        {activeTab === 'multifactor' && <MultiFactorTab />}
-        {activeTab === 'derivatives' && <DerivativesTab />}
-        {activeTab === 'buynow'   && <BuyNowTab />}
-        {activeTab === 'strongbuy' && <StrongBuyTab />}
-        {activeTab === 'portfolio' && <PortfolioTab />}
-        {activeTab === 'backtest' && <BacktestTab />}
-        {activeTab === 'vn100bt'  && <PortfolioBacktestTab />}
-        {activeTab === 'methods'  && <MethodsTab />}
-        {activeTab === 'funds'    && <FundsTab />}
-        {activeTab === 'crawl'   && <CrawlTab crawlStatus={crawlStatus} isRunning={isRunning} onRefresh={refresh} />}
-        {activeTab === 'history' && <HistoryTab runs={runs} />}
-      </main>
+          {/* ── Main content ────────────────────────────────────────────── */}
+          <main className="px-6 py-5 max-w-screen-2xl mx-auto">
+            {activeTab === 'market'   && <MarketTab />}
+            {activeTab === 'board'    && <VnBoardTab />}
+            {activeTab === 'industry' && <IndustryTab />}
+            {activeTab === 'wyckoff'  && <WyckoffTab />}
+            {activeTab === 'wyckoffopt' && <WyckoffOptTab />}
+            {activeTab === 'multifactor' && <MultiFactorTab />}
+            {activeTab === 'derivatives' && <DerivativesTab />}
+            {activeTab === 'buynow'   && <BuyNowTab />}
+            {activeTab === 'strongbuy' && <StrongBuyTab />}
+            {activeTab === 'portfolio' && <PortfolioTab />}
+            {activeTab === 'backtest' && <BacktestTab />}
+            {activeTab === 'vn100bt'  && <PortfolioBacktestTab />}
+            {activeTab === 'methods'  && <MethodsTab />}
+            {activeTab === 'funds'    && <FundsTab />}
+            {activeTab === 'crawl'   && <CrawlTab crawlStatus={crawlStatus} isRunning={isRunning} onRefresh={refresh} />}
+            {activeTab === 'history' && <HistoryTab runs={runs} />}
+          </main>
+        </div>
+      </div>
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
       <footer className="border-t border-[#30363d] px-6 py-3 text-center text-xs text-[#8b949e]/50">
