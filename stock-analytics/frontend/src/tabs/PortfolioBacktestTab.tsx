@@ -172,6 +172,7 @@ export function PortfolioBacktestTab() {
   const [symbolFilter, setSymbolFilter] = useState<string>('all')
   const [tradeView,    setTradeView]    = useState<'list' | 'symbol'>('list')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [prog, setProg] = useState<{ pct: number; msg: string } | null>(null)
 
   const fetchLatest = useCallback(async () => {
     setLoading(true)
@@ -180,28 +181,54 @@ export function PortfolioBacktestTab() {
     finally { setLoading(false) }
   }, [])
 
-  useEffect(() => {
-    fetchLatest()
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [fetchLatest])
-
-  const handleRun = async () => {
-    setRunning(true)
-    try { await api.runVn100ModelBacktest(start, capital) }
-    catch { setRunning(false); return }
+  // Poll until the backend reports the run finished, then refresh the result.
+  // Works whether we started the run or are attaching to one already in flight.
+  const startPolling = useCallback(() => {
     if (pollRef.current) clearInterval(pollRef.current)
     let sawRunning = false
+    let misses = 0
     pollRef.current = setInterval(async () => {
       try {
         const st = await api.status()
-        if (st.running) { sawRunning = true; return }
-        if (sawRunning || !st.running) {
+        if (st.running) {
+          sawRunning = true; misses = 0
+          try {
+            const p = await api.backtestProgress()
+            if (p && (p.overall_pct || p.message)) setProg({ pct: p.overall_pct ?? 0, msg: p.message || p.phase || '' })
+          } catch { /* progress is best-effort */ }
+          return
+        }
+        misses++
+        // Stop once we've seen it run and it's finished — or after a few empty
+        // polls (the run had already completed before we attached).
+        if (sawRunning || misses >= 3) {
           if (pollRef.current) clearInterval(pollRef.current)
-          setRunning(false)
+          setRunning(false); setProg(null)
           await fetchLatest()
         }
       } catch { /* keep polling */ }
     }, 3000)
+  }, [fetchLatest])
+
+  useEffect(() => {
+    fetchLatest()
+    // Attach to a backtest already running (e.g. started before this mount).
+    api.status().then(st => { if (st.running) { setRunning(true); startPolling() } }).catch(() => {})
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [fetchLatest, startPolling])
+
+  const handleRun = async () => {
+    setRunning(true)
+    try {
+      await api.runVn100ModelBacktest(start, capital)
+    } catch (e) {
+      // 409 = a crawl/backtest is already running → attach to it, don't fail silently.
+      if (e instanceof Error && /already running|409|conflict/i.test(e.message)) {
+        startPolling(); return
+      }
+      setRunning(false); return
+    }
+    startPolling()
   }
 
   const s = data?.summary
@@ -280,7 +307,20 @@ export function PortfolioBacktestTab() {
 
       {running && (
         <div className="rounded-lg border border-cyan-900/50 bg-cyan-950/20 p-3 text-[11px] text-cyan-200/80">
-          Đang chạy backtest model trên VN100… Lần chạy ĐẦU phải dựng snapshot (~10 phút) rồi cache lại; các lần sau nhanh hơn nhiều.
+          {prog ? (
+            <>
+              <div className="flex items-center justify-between gap-2">
+                <span>Đang chạy backtest model trên VN100… {prog.msg && <span className="text-cyan-300/70">· {prog.msg}</span>}</span>
+                <span className="font-mono text-cyan-200">{prog.pct.toFixed(0)}%</span>
+              </div>
+              <div className="mt-1.5 h-1.5 rounded bg-cyan-950 overflow-hidden">
+                <div className="h-full bg-cyan-500 transition-all" style={{ width: `${Math.min(100, Math.max(2, prog.pct))}%` }} />
+              </div>
+              {prog.pct <= 50 && <div className="mt-1 text-cyan-200/50">Đang dựng snapshot — lần đầu ~10 phút rồi cache lại; các lần sau nhanh hơn nhiều.</div>}
+            </>
+          ) : (
+            'Đang chạy backtest model trên VN100… Lần chạy ĐẦU phải dựng snapshot (~10 phút) rồi cache lại; các lần sau nhanh hơn nhiều.'
+          )}
         </div>
       )}
       {loading && <div className="text-center py-12 text-[#8b949e] text-sm animate-pulse">Đang tải backtest gần nhất…</div>}
